@@ -57,7 +57,7 @@ def run_bot():
     
     {papers_info}
 
-    위 논문들을 바탕으로 다음 두 가지를 작성해 주세요.
+    위 논문들을 바탕으로 다음 세 가지를 작성해 주세요.
 
     1. [요약]
     - 노션 기록용 핵심 요약.
@@ -65,7 +65,7 @@ def run_bot():
     - 각 논문 요약 시작시 '1. (논문제목)' 식으로 앞에 번호만 붙여 진행할 것
     - 논문들 사이는 줄바꿈으로 구분할 것.
 
-    2. [대본] 작성 가이드라인:
+    2. [전체대본] 작성 가이드라인:
     - 형식: 라디오 방송 '모닝 Computer Vision AI 브리핑' 스크립트.
     - 분량: 각 논문 제목을 말한뒤, 한 논문 당 약 500~600자 내외로 상세히 설명하여, 전체 방송이 논문당 2분정도 소요되게 할 것.
     - 구성: [도입부] - [본문: 논문] - [맺음말]의 단일 에피소드 구조.
@@ -80,6 +80,10 @@ def run_bot():
         * 텍스트를 읽는 것이 아니라, 동료 연구자에게 '설명'해주는 듯한 차분하고 다정한 어조.
         * "이 논문은 ~를 제안합니다" 보다는 "이 연구에서는 ~라는 흥미로운 접근을 시도했습니다" 같은 구어체 사용.
     - 마무리: "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, IRCV 연구 비서였습니다. 감사합니다."
+    
+    3. [3분대본]: 바쁜 사람들을 위한 초압축 브리핑. 
+       - 전체 논문의 핵심만 훑으며 약 3분(공백 포함 3000자 내외) 분량으로 작성.
+       - "시간이 없으신 분들을 위한 3분 핵심 요약입니다"라는 멘트로 시작할 것.
 
     출력 형식:
     [요약]
@@ -92,14 +96,15 @@ def run_bot():
     # 5. GPT-4o에게 통합 요청 (긴 대본 생성을 위해 max_tokens 확장)
     response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 20분 이상의 심층 브리핑 대본을 아주 풍성하게 작성해줘."},
+        messages=[{"role": "system", "content": "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 20분 이상의 심층 브리핑 대본을 아주 풍성하게 작성하고, 3분 압축 브리핑을 작성해줘"},
                   {"role": "user", "content": combined_prompt}],
         max_tokens=4000 
     )
     full_text = response.choices[0].message.content
-    summary_text = full_text.split("[대본]")[0].replace("[요약]", "").strip()
-    audio_script = full_text.split("[대본]")[1].strip()
-
+    summary_text = full_text.split("[전체대본]")[0].replace("[요약]", "").strip()
+    audio_script_full = full_text.split("[전체대본]")[1].split("[3분대본]")[0].strip()
+    audio_script_3min = full_text.split("[3분대본]")[1].strip()
+    
     # 6. 분할 TTS 및 오디오 병합 (4,000자 제한 해결)
     # 문장 단위(마침표)로 쪼개서 약 2500자씩 청크 생성
     sentences = audio_script.split('. ')
@@ -130,14 +135,27 @@ def run_bot():
         combined_audio += audio_segment
         print(f"파트 {i+1}/{len(chunks)} 생성 완료")
 
-    # 최종 파일 저장
+    # [전체대본]최종 파일 저장
     today_date = now.strftime('%Y%m%d') 
     file_name = f"CV_Daily_Briefing_{today_date}.mp3" 
     full_file_path = os.path.join(audio_dir, file_name)
     combined_audio.export(full_file_path, format="mp3")
 
+    #6-2 [3분대본]
+    file_name_3min = f"3Min_Summary_{today_date}.mp3"
+    full_file_path_3min = os.path.join(audio_dir, file_name_3min)
+    
+    response_3min = client.audio.speech.create(
+        model="tts-1-hd", # 3분용은 가볍게 기본 모델 사용 가능
+        voice="onyx",
+        input=audio_script_3min,
+        speed=1.2
+    )
+    response_3min.stream_to_file(full_file_path_3min)
+
     # 7. 노션에 페이지 생성 (기존 형식 유지)
     audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name}"
+    audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
     page_title = f"[{now.strftime('%Y-%m-%d')}] 통합 브리핑 ({len(valid_papers)}건)"
 
     notion_children = [
@@ -164,6 +182,7 @@ def run_bot():
             "이름": {"title": [{"text": {"content": page_title}}]},
             "날짜": {"date": {"start": now.date().isoformat()}},
             "오디오": {"url": audio_url}
+            "3분 논문": {"url": audio_url_3min}
         },
         children=notion_children
     )

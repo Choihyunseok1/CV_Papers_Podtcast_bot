@@ -1,3 +1,4 @@
+```python
 import os
 import arxiv
 import openai
@@ -20,8 +21,8 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
 BATCH_SIZE_FULL = 2
-MAX_OUT_TOKENS_SUMMARY = 3500
-MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
+MAX_OUT_TOKENS_SUMMARY = 3200
+MAX_OUT_TOKENS_FULL_PER_BATCH = 3200
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
@@ -29,6 +30,13 @@ TTS_SPEED = 1.2
 
 TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
+
+
+def split_notion_text(text, max_len=1900):
+    text = (text or "").strip()
+    if not text:
+        return []
+    return [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
 
 def chunk_text_by_chars(text, chunk_chars=2000, overlap=0):
@@ -102,7 +110,7 @@ def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_i
 - 오직 각 논문 설명 본문만 출력하세요.
 
 분량:
-- 논문 1편당 약 2000자 내외로 상세히 설명하세요.
+- 논문 1편당 약 2800자 내외로 상세히 설명하세요.
 
 구조:
 A. 논문 제목을 한 번 말하기
@@ -195,8 +203,8 @@ def parse_title_body_blocks(text):
 
 
 def assemble_radio_script(full_batches_text, total_papers):
-    intro = f"안녕하세요, 아이알시브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
-    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이알시브이 연구 비서였습니다. 감사합니다."
+    intro = f"안녕하세요, 아이알씨브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
+    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이알씨브이 연구 비서였습니다. 감사합니다."
 
     all_blocks = []
     for batch_text in full_batches_text:
@@ -205,9 +213,8 @@ def assemble_radio_script(full_batches_text, total_papers):
     script_parts = [intro, ""]
     for i, (title, body) in enumerate(all_blocks, start=1):
         title_tts = sanitize_title_for_tts(title)
-        transition = f"... {i}번째 논문입니다,"
+        transition = f" {i}번째 논문입니다."
         script_parts.append(transition)
-        script_parts.append(f".")
         script_parts.append(body)
         script_parts.append("")
 
@@ -295,17 +302,27 @@ def run_bot():
 
     audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_full}"
     audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
-    page_title = f"[{now.strftime('%Y-%m-%d')}] 모닝 브리핑 ({len(valid_papers)}건)"
+    page_title = f"[{now.strftime('%Y-%m-%d')}] 통합 브리핑 ({len(valid_papers)}건)"
 
+    # --------- 여기부터가 "바뀐 부분"의 핵심: 요약을 2000자 제한에 맞춰 쪼개기 ---------
     notion_children = [
         {"object": "block", "type": "heading_2",
          "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 핵심 요약"}}]}},
-        {"object": "block", "type": "paragraph",
-         "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary_text}}]}},
+    ]
+
+    for part in split_notion_text(summary_text, max_len=1900):
+        notion_children.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": part}}]}
+        })
+
+    notion_children += [
         {"object": "block", "type": "divider", "divider": {}},
         {"object": "block", "type": "heading_2",
          "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 원문 링크"}}]}}
     ]
+    # ---------------------------------------------------------------------
 
     for i, p in enumerate(valid_papers):
         notion_children.append({
@@ -335,3 +352,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+```

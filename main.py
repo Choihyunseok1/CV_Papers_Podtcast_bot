@@ -29,7 +29,7 @@ def run_bot():
     # 3. arXiv 논문 검색 (최근 등록 순으로 10개까지 가져와서 시간 필터링)
     search = arxiv.Search(
         query="cat:cs.CV",
-        max_results=10,
+        max_results=5,
         sort_by=arxiv.SortCriterion.SubmittedDate
     )
 
@@ -66,6 +66,7 @@ def run_bot():
 
     2. [대본] 작성 가이드라인:
     - 형식: 라디오 방송 '모닝 Computer Vision AI 브리핑' 스크립트.
+    - 분량: 각 논문당 약 400~500자 내외로 상세히 설명하여, 전체 방송이 논문당 1분 30초 정도 소요되게 할 것.
     - 구성: [도입부] - [본문: 논문별 연결] - [맺음말]의 단일 에피소드 구조.
     - 도입부: "안녕하세요, IRCV 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {len(valid_papers)}건입니다."로 시작할 것.
     - 호흡 조절: 
@@ -122,6 +123,45 @@ def run_bot():
     short_titles = " | ".join([t[:20] + "..." if len(t) > 20 else t for t in paper_titles_list])
     page_title = f"[{now.strftime('%Y-%m-%d')}] 통합 브리핑 ({len(valid_papers)}건)"
 
+
+    notion_children = [
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "📄 논문 핵심 요약"}}]}
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary_text}}]}
+        },
+        {
+            "object": "block",
+            "type": "divider",
+            "divider": {}
+        },
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🔗 논문 원문 링크"}}] }
+        }
+    ]
+
+    # 각 논문별 PDF 링크 블록을 생성해서 위 리스트에 더해줍니다.
+    for i, p in enumerate(valid_papers):
+        link_block = {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": f"{i+1}. {p.title} "}},
+                    {"type": "text", "text": {"content": "[PDF]", "link": {"url": p.pdf_url}}, "annotations": {"bold": True, "color": "blue"}}
+                ]
+            }
+        }
+        notion_children.append(link_block)
+
+    # 최종 페이지 생성
     notion.pages.create(
         parent={"database_id": DATABASE_ID},
         properties={
@@ -129,18 +169,7 @@ def run_bot():
             "날짜": {"date": {"start": now.date().isoformat()}},
             "오디오": {"url": audio_url}
         },
-        children=[
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "📄 논문 핵심 요약"}}]}
-            },
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary_text}}]}
-            }
-        ]
+        children=notion_children
     )
     print(f"통합 브리핑 생성 완료: {len(valid_papers)}개의 논문")
 

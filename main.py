@@ -110,7 +110,7 @@ def run_bot():
     
     # 6. 분할 TTS 및 오디오 병합 (4,000자 제한 해결)
     # 문장 단위(마침표)로 쪼개서 약 2500자씩 청크 생성
-    sentences = audio_script.split('. ')
+    sentences = audio_script_full.split('. ')
     chunks = []
     temp_chunk = ""
     for sentence in sentences:

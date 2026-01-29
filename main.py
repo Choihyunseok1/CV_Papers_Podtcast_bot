@@ -295,7 +295,7 @@ def run_bot():
 
     audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_full}"
     audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
-    page_title = f"[{now.strftime('%Y-%m-%d')}] 통합 브리핑 ({len(valid_papers)}건)"
+    page_title = f"[{now.strftime('%Y-%m-%d')}] 모닝 브리핑 ({len(valid_papers)}건)"
 
     notion_children = [
         {"object": "block", "type": "heading_2",

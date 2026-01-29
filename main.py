@@ -6,6 +6,7 @@ import datetime
 from pytz import timezone
 from pydub import AudioSegment
 import io
+import re
 
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -19,8 +20,8 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
 BATCH_SIZE_FULL = 2
-MAX_OUT_TOKENS_SUMMARY = 2500
-MAX_OUT_TOKENS_FULL_PER_BATCH = 3900
+MAX_OUT_TOKENS_SUMMARY = 2000
+MAX_OUT_TOKENS_FULL_PER_BATCH = 3200
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
@@ -46,18 +47,15 @@ def chunk_text_by_chars(text, chunk_chars=2000, overlap=0):
     return chunks
 
 
-def build_papers_info(valid_papers):
+def build_papers_info(papers):
     papers_info = ""
-    titles = []
-    for i, p in enumerate(valid_papers):
+    for i, p in enumerate(papers):
         papers_info += f"논문 {i+1} 제목: {p.title}\n초록: {p.summary}\n\n"
-        titles.append(p.title)
-    return papers_info, titles
+    return papers_info
 
 
 def prompt_summary_and_3min(valid_papers):
-    papers_info, _ = build_papers_info(valid_papers)
-
+    papers_info = build_papers_info(valid_papers)
     return f"""
 아래는 어제 저녁부터 오늘 새벽 사이에 새로 발표된 {len(valid_papers)}개의 컴퓨터 비전 논문입니다.
 
@@ -73,13 +71,12 @@ def prompt_summary_and_3min(valid_papers):
 - 논문들 사이는 줄바꿈으로 구분할 것.
 
 2. [3분대본]
-- 바쁜 사람들을 위한 초압축 브리핑.
-- "시간이 없으신 분들을 위한 3분 핵심 요약입니다"라는 멘트로 시작할 것.
+- "시간이 없으신 분들을 위한 3분 핵심 요약입니다"로 시작할 것.
 - 각 논문 제목을 말한 뒤, 논문 당 약 600자 내외로 설명할 것.
-- 논문의 공식 제목은 반드시 영문으로 표기하되, 제목에 포함된 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
+- 논문의 공식 제목은 반드시 영문으로 표기하되, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
 - 모든 기술 약어(CNN, ViT, SOTA 등)는 100% 한글 발음으로만 표기할 것.
-- 문장 사이에는 충분한 쉼표(,)를 사용해 호흡 지점을 표시할 것.
-- 텍스트를 읽는 것이 아니라, 동료 연구자에게 설명해주는 듯한 차분하고 다정한 어조.
+- 쉼표(,)를 충분히 사용해 호흡 지점을 표시할 것.
+- 동료 연구자에게 설명하듯 차분한 구어체.
 
 출력 형식:
 [요약]
@@ -90,43 +87,43 @@ def prompt_summary_and_3min(valid_papers):
 """.strip()
 
 
-def prompt_full_body_for_batch(batch_papers, batch_index, total_batches):
-    papers_info, _ = build_papers_info(batch_papers)
+def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_index):
+    papers_info = build_papers_info(batch_papers)
 
     return f"""
 아래는 컴퓨터 비전 논문 배치 {batch_index}/{total_batches}입니다.
+이 배치의 논문 전역 번호는 {start_index}부터 시작합니다.
 
 {papers_info}
 
-너의 목표는 오디오용 방송 원고를 만드는 것입니다.
-중요: 지금은 방송의 도입부와 맺음말을 쓰지 않습니다. 오직 각 논문의 본문만 씁니다.
+중요:
+- 지금은 방송의 도입부와 맺음말을 쓰지 않습니다.
+- "첫 번째 논문", "이번 배치", "안녕하세요", "오늘은" 같은 진행 멘트와 순서 멘트를 절대 쓰지 마세요.
+- 오직 각 논문 설명 본문만 출력하세요.
 
-[작성 규칙]
-- 형식: 라디오 방송 본문 스크립트.
-- 분량: 논문 1편당 약 4000자 내외로 상세히 설명할 것. 배치에 포함된 논문 수만큼 각각 작성할 것.
-- 각 논문은 아래 구조를 반드시 따를 것:
-  A. 논문 제목을 한 번 말하기
-  B. 문제의식과 배경
-  C. 핵심 아이디어 한 줄 요약 후, 왜 중요한지
-  D. 방법: 구성 요소를 단계적으로 설명
-  E. 실험/결과: 무엇을 비교했고 어떤 경향이 나왔는지
-  F. 한계/추후 과제: 조심스럽게 언급
-  G. 실전 감상: 연구자가 얻을 수 있는 포인트 2~3개
+분량:
+- 논문 1편당 약 2800자 내외로 상세히 설명하세요.
 
-[언어 규칙]
-- 논문의 공식 제목은 반드시 영문으로 표기하되, 제목에 포함된 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
-- 모든 기술 약어(CNN, ViT, SOTA 등)는 100% 한글 발음으로만 표기할 것.
-- 호흡 조절을 위해 쉼표(,)를 충분히 사용하고, 강조 지점은 마침표(.)로 끊어 읽게 할 것.
-- "제안합니다" 같은 딱딱한 톤보다, "이 연구에서는 이런 접근을 시도했습니다" 같은 구어체를 사용할 것.
+구조:
+A. 논문 제목을 한 번 말하기
+B. 문제의식과 배경
+C. 핵심 아이디어 한 줄 요약과 의미
+D. 방법을 단계적으로 설명
+E. 실험과 결과의 경향
+F. 한계와 추후 과제
+G. 실전 감상 포인트 2개
 
-[출력 형식]
-- 배치에 포함된 논문을 1번부터 순서대로 작성.
-- 각 논문 시작은 반드시 다음처럼:
-  (1) TITLE: <영문 제목>
-  BODY:
-  <본문>
+언어 규칙:
+- 논문 제목은 영문으로, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
+- 기술 약어(CNN, ViT, SOTA 등)는 한글 발음으로만 표기할 것.
+- 쉼표(,)로 호흡, 마침표(.)로 강조.
 
-- 논문과 논문 사이는 빈 줄 2줄로 구분.
+출력 형식(반드시 준수):
+TITLE: <영문 제목>
+BODY:
+<본문>
+
+(논문과 논문 사이는 빈 줄 2줄)
 """.strip()
 
 
@@ -139,13 +136,12 @@ def call_gpt_text(system_text, user_text, max_tokens):
         ],
         max_tokens=max_tokens
     )
-    return resp.choices[0].message.content.strip()
+    return (resp.choices[0].message.content or "").strip()
 
 
 def synthesize_tts_to_audio(text, tts_chunk_chars=2000, overlap=0):
     chunks = chunk_text_by_chars(text, chunk_chars=tts_chunk_chars, overlap=overlap)
     combined = AudioSegment.empty()
-
     for chunk in chunks:
         audio_part_response = client.audio.speech.create(
             model=TTS_MODEL,
@@ -156,8 +152,71 @@ def synthesize_tts_to_audio(text, tts_chunk_chars=2000, overlap=0):
         part_stream = io.BytesIO(audio_part_response.content)
         segment = AudioSegment.from_file(part_stream, format="mp3")
         combined += segment
-
     return combined
+
+
+def sanitize_title_for_tts(title):
+    if not title:
+        return ""
+    return re.sub(r"[:\-+/]", ",", title)
+
+
+def parse_title_body_blocks(text):
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    pattern = r"TITLE:\s*(.*?)\s*BODY:\s*(.*?)(?=(?:\n\s*TITLE:)|\Z)"
+    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+
+    blocks = []
+    for title, body in matches:
+        t = title.strip()
+        b = body.strip()
+        if t and b:
+            blocks.append((t, b))
+
+    if blocks:
+        return blocks
+
+    fallback = []
+    chunks = re.split(r"\n\s*TITLE:\s*", "\n" + text)
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        if "BODY:" in c:
+            t, b = c.split("BODY:", 1)
+            t = t.strip()
+            b = b.strip()
+            if t and b:
+                fallback.append((t, b))
+    return fallback
+
+
+def assemble_radio_script(full_batches_text, total_papers):
+    intro = f"안녕하세요, 아이아르시브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
+    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이아르시브이 연구 비서였습니다. 감사합니다."
+
+    all_blocks = []
+    for batch_text in full_batches_text:
+        all_blocks.extend(parse_title_body_blocks(batch_text))
+
+    script_parts = [intro, ""]
+    for i, (title, body) in enumerate(all_blocks, start=1):
+        title_tts = sanitize_title_for_tts(title)
+        transition = f"이어서 {i}번째 논문입니다,"
+        script_parts.append(transition)
+        script_parts.append(f"{title_tts}.")
+        script_parts.append(body)
+        script_parts.append("")
+
+    if len(all_blocks) < total_papers:
+        script_parts.append("일부 논문 원고가 누락되어, 생성된 부분까지만 이어서 읽겠습니다.")
+        script_parts.append("")
+
+    script_parts.append(outro)
+    return "\n".join(script_parts).strip()
 
 
 def run_bot():
@@ -185,8 +244,8 @@ def run_bot():
         print("해당 시간대에 새로 올라온 논문이 없습니다.")
         return
 
-    system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 자연스럽고 정확하게, 요약과 3분 대본을 작성해줘."
-    system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 자연스럽고 자세하게, 논문 본문 스크립트를 작성해줘."
+    system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 요약과 3분 대본을 작성해줘."
+    system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."
 
     user_summary = prompt_summary_and_3min(valid_papers)
     summary_out = call_gpt_text(system_summary, user_summary, MAX_OUT_TOKENS_SUMMARY)
@@ -201,15 +260,14 @@ def run_bot():
     paper_batches = [valid_papers[i:i + BATCH_SIZE_FULL] for i in range(0, len(valid_papers), BATCH_SIZE_FULL)]
     total_batches = len(paper_batches)
 
-    full_bodies = []
+    full_batches_text = []
     for idx, batch in enumerate(paper_batches, start=1):
-        user_full = prompt_full_body_for_batch(batch, idx, total_batches)
-        batch_body = call_gpt_text(system_full, user_full, MAX_OUT_TOKENS_FULL_PER_BATCH)
-        full_bodies.append(batch_body)
+        start_index = (idx - 1) * BATCH_SIZE_FULL + 1
+        user_full = prompt_full_body_for_batch(batch, idx, total_batches, start_index)
+        batch_text = call_gpt_text(system_full, user_full, MAX_OUT_TOKENS_FULL_PER_BATCH)
+        full_batches_text.append(batch_text)
 
-    intro = f"안녕하세요, 아이아르시브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {len(valid_papers)}건입니다."
-    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이아르시브이 연구 비서였습니다. 감사합니다."
-    audio_script_full = intro + "\n\n" + "\n\n".join(full_bodies) + "\n\n" + outro
+    audio_script_full = assemble_radio_script(full_batches_text, total_papers=len(valid_papers))
 
     combined_audio = synthesize_tts_to_audio(
         audio_script_full,

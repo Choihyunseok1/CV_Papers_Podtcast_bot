@@ -21,11 +21,11 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 BATCH_SIZE_FULL = 2
 MAX_OUT_TOKENS_SUMMARY = 3200
-MAX_OUT_TOKENS_FULL_PER_BATCH = 3200
+MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
-TTS_SPEED = 1.2
+TTS_SPEED = 1.25
 
 TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
@@ -109,7 +109,7 @@ def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_i
 - 오직 각 논문 설명 본문만 출력하세요.
 
 분량:
-- 논문 1편당 약 2800자 내외로 상세히 설명하세요.
+- 논문 1편당 약 2200자 내외로 상세히 설명하세요.
 
 구조:
 A. 논문 제목을 한 번 말하기

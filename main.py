@@ -122,7 +122,7 @@ def run_bot():
             model="tts-1-hd",
             voice="onyx",
             input=chunk,
-            speed=1
+            speed=1.2
         )
         # 메모리에서 직접 오디오 데이터 로드
         part_stream = io.BytesIO(audio_part_response.content)

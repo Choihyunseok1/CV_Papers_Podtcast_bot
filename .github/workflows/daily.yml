@@ -1,0 +1,23 @@
+name: Daily AI Podcast Bot
+on:
+  schedule:
+    - cron: '0 21 * * *' # 한국 시간 매일 오전 6시 (UTC 21:00)
+  workflow_dispatch: # 우리가 수동으로 실행 버튼 누를 수도 있게 함
+
+jobs:
+  run_bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Python 세팅
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: 도구 설치
+        run: pip install arxiv openai notion-client
+      - name: 프로그램 실행
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python main.py

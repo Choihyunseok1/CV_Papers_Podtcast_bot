@@ -13,7 +13,7 @@ NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 DATABASE_ID = os.environ["DATABASE_ID"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 GITHUB_USER = "Choihyunseok1"
-GITHUB_REPO = "Paper2Audio"
+GITHUB_REPO = "CV_Papers_Podtcast_bot"
 
 notion = Client(auth=NOTION_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)

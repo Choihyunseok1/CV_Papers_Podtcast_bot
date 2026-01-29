@@ -20,8 +20,8 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
 BATCH_SIZE_FULL = 2
-MAX_OUT_TOKENS_SUMMARY = 2000
-MAX_OUT_TOKENS_FULL_PER_BATCH = 3200
+MAX_OUT_TOKENS_SUMMARY = 3500
+MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
@@ -102,7 +102,7 @@ def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_i
 - 오직 각 논문 설명 본문만 출력하세요.
 
 분량:
-- 논문 1편당 약 2800자 내외로 상세히 설명하세요.
+- 논문 1편당 약 2000자 내외로 상세히 설명하세요.
 
 구조:
 A. 논문 제목을 한 번 말하기
@@ -195,8 +195,8 @@ def parse_title_body_blocks(text):
 
 
 def assemble_radio_script(full_batches_text, total_papers):
-    intro = f"안녕하세요, 아이아르시브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
-    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이아르시브이 연구 비서였습니다. 감사합니다."
+    intro = f"안녕하세요, 아이알시브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
+    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이알시브이 연구 비서였습니다. 감사합니다."
 
     all_blocks = []
     for batch_text in full_batches_text:
@@ -205,9 +205,9 @@ def assemble_radio_script(full_batches_text, total_papers):
     script_parts = [intro, ""]
     for i, (title, body) in enumerate(all_blocks, start=1):
         title_tts = sanitize_title_for_tts(title)
-        transition = f"이어서 {i}번째 논문입니다,"
+        transition = f"... {i}번째 논문입니다,"
         script_parts.append(transition)
-        script_parts.append(f"{title_tts}.")
+        script_parts.append(f".")
         script_parts.append(body)
         script_parts.append("")
 

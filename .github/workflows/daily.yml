@@ -14,7 +14,9 @@ jobs:
         with:
           python-version: '3.9'
       - name: 도구 설치
-        run: pip install arxiv openai notion-client pytz
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install arxiv openai notion_client pytz pydub
       - name: 프로그램 실행
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}

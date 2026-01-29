@@ -116,10 +116,20 @@ def run_bot():
         properties={
             "이름": {"title": [{"text": {"content": page_title}}]},
             "날짜": {"date": {"start": now.date().isoformat()}},
-            "카테고리": {"select": {"name": "Daily Update"}},
-            "요약": {"rich_text": [{"text": {"content": summary_text}}]},
             "오디오": {"url": audio_url}
-        }
+        },
+        children=[
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "📄 논문 핵심 요약"}}]}
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary_text}}]}
+            }
+        ]
     )
     print(f"통합 브리핑 생성 완료: {len(valid_papers)}개의 논문")
 

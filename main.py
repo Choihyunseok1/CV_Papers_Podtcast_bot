@@ -112,16 +112,14 @@ def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_i
 - 논문 1편당 약 2200자 내외로 상세히 설명하세요.
 
 구조:
-A. 논문 제목을 한 번 말하기
-B. 문제의식과 배경
-C. 핵심 아이디어 한 줄 요약과 의미
-D. 방법을 단계적으로 설명
-E. 실험과 결과의 경향
-F. 한계와 추후 과제
-G. 실전 감상 포인트 2개
+A. 문제의식과 배경
+B. 핵심 아이디어 한 줄 요약과 의미
+C. 방법을 단계적으로 설명
+D. 실험과 결과의 경향
+E. 한계와 추후 과제
+F. 실전 감상 포인트 2개
 
 언어 규칙:
-- 논문 제목은 영문으로, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
 - 기술 약어(CNN, ViT, SOTA 등)는 한글 발음으로만 표기할 것.
 - 쉼표(,)로 호흡, 마침표(.)로 강조.
 
@@ -214,6 +212,7 @@ def assemble_radio_script(full_batches_text, total_papers):
         title_tts = sanitize_title_for_tts(title)
         transition = f"지금부터 {i}번째 논문입니다."
         script_parts.append(transition)
+        script_parts.append(f"{title_tts}.")
         script_parts.append(body)
         script_parts.append("")
 

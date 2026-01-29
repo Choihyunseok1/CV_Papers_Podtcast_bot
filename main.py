@@ -181,7 +181,7 @@ def run_bot():
         properties={
             "이름": {"title": [{"text": {"content": page_title}}]},
             "날짜": {"date": {"start": now.date().isoformat()}},
-            "오디오": {"url": audio_url}
+            "오디오": {"url": audio_url},
             "3분 논문": {"url": audio_url_3min}
         },
         children=notion_children

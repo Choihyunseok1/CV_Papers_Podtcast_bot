@@ -98,7 +98,7 @@ def run_bot():
     audio_response = client.audio.speech.create(
         model="tts-1-hd",
         voice="echo",
-        input=audio_script
+        input=audio_script,
         speed=0.8
     )
     audio_response.stream_to_file(full_file_path)

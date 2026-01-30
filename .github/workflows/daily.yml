@@ -1,8 +1,7 @@
 name: CV_Papers_Podcast_bot
 on:
   schedule:
-    - cron: "1 0 * * *"  # 00:01 UTC = 09:01 KST
-    - cron: "1 1 * * *"  # 01:01 UTC = 10:01 KST
+    - cron: "0 2 * * *"  # 02:00 UTC = 11:00 KST
   workflow_dispatch: # 우리가 수동으로 실행 버튼 누를 수도 있게 함
 
 jobs:

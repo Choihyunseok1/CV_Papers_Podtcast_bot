@@ -1,7 +1,7 @@
 import os
 import re
 import io
-import math
+import time
 import datetime
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
@@ -20,7 +20,6 @@ from pydub import AudioSegment
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
 DATABASE_ID = os.environ.get("DATABASE_ID", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
 
 GITHUB_USER = os.environ.get("GITHUB_USER", "Choihyunseok1")
@@ -40,8 +39,6 @@ ARXIV_CATEGORY_QUERY = "cat:cs.CV"
 ARXIV_MAX_RESULTS = 800
 
 TOPK_SAVE = 10
-PRESELECT_K = 60
-
 BATCH_SIZE_FULL = 2
 
 MAX_OUT_TOKENS_SUMMARY = 4000
@@ -51,18 +48,28 @@ TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
 TTS_SPEED = 1.25
 
-TTS_CHUNK_CHARS = 2000
-TTS_CHUNK_OVERLAP = 0
+# TTS chunking 품질 개선: 문장 단위 chunk 권장
+TTS_CHUNK_CHARS = 1700
 
 SEOUL_TZ = ZoneInfo("Asia/Seoul")
 ET_TZ = ZoneInfo("America/New_York")
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
-S2_TIMEOUT = 10
+S2_TIMEOUT = 15
 
+# code_open 오탐 줄이기: 도메인 기반 힌트만 유지
+CODE_HINTS = [
+    "github.com/",
+    "gitlab.com/",
+    "bitbucket.org/",
+    "huggingface.co/",
+]
 
-# NEGATIVE_HYPE = ["revolutionary", "breakthrough", "sota", "state-of-the-art"]
-CODE_HINTS = ["github.com", "gitlab.com", "bitbucket.org", "project page", "code"]
+# Semantic Scholar 호출 안정화 설정
+S2_MAX_RETRIES = 4
+S2_BACKOFF_BASE_SEC = 1.2
+S2_JITTER_SEC = 0.35
+S2_MIN_INTERVAL_SEC = 0.12
 
 
 @dataclass
@@ -74,8 +81,7 @@ class ScoredPaper:
 
 
 # =========================
-# TIME WINDOW: arXiv announce 기준
-# (ET 14:00 cutoff / ET 20:00 announce)
+# TIME WINDOW: arXiv announce 기준 (ET)
 # - Tue/Wed/Thu: (prev day 14:00) ~ (today 14:00)
 # - Mon: (Fri 14:00) ~ (Mon 14:00)
 # - Sun: (Thu 14:00) ~ (Fri 14:00)
@@ -98,9 +104,9 @@ def compute_announce_window_et(now_et: datetime.datetime) -> Tuple[datetime.date
     ad = latest_announce_date_et(now_et)
 
     if ad.weekday() == 6:
-        end_date = ad - datetime.timedelta(days=2)
+        end_date = ad - datetime.timedelta(days=2)  # Friday
         end_et = datetime.datetime(end_date.year, end_date.month, end_date.day, 14, 0, tzinfo=ET_TZ)
-        start_et = end_et - datetime.timedelta(days=1)
+        start_et = end_et - datetime.timedelta(days=1)  # Thursday 14:00
         return start_et, end_et, ad
 
     if ad.weekday() == 0:
@@ -116,11 +122,38 @@ def compute_announce_window_et(now_et: datetime.datetime) -> Tuple[datetime.date
 # =========================
 # UTIL
 # =========================
+def safe_lower(s: str) -> str:
+    return (s or "").lower()
+
+
 def split_notion_text(text: str, max_len: int = 1900) -> List[str]:
     t = (text or "").strip()
     if not t:
         return []
     return [t[i:i + max_len] for i in range(0, len(t), max_len)]
+
+
+def sanitize_title_for_tts(title: str) -> str:
+    if not title:
+        return ""
+    return re.sub(r"[:\-+/]", ",", title)
+
+
+def extract_arxiv_id(entry_id: str) -> str:
+    if not entry_id:
+        return ""
+    m = re.search(r"arxiv\.org/abs/([^v]+)(?:v\d+)?", entry_id)
+    if m:
+        return m.group(1).strip()
+    return entry_id.rsplit("/", 1)[-1].replace("v1", "").replace("v2", "").strip()
+
+
+def format_kst_date(now_kst: datetime.datetime) -> str:
+    return f"{now_kst.month}월 {now_kst.day}일"
+
+
+def format_kst_date_iso(now_kst: datetime.datetime) -> str:
+    return now_kst.strftime("%Y-%m-%d")
 
 
 def number_to_korean_ordinal(n: int) -> str:
@@ -139,47 +172,48 @@ def number_to_korean_ordinal(n: int) -> str:
     return mapping.get(n, f"{n}번째")
 
 
-def chunk_text_by_chars(text: str, chunk_chars: int = 2000, overlap: int = 0) -> List[str]:
+def chunk_text_by_sentences(text: str, max_chars: int = 1700) -> List[str]:
     t = (text or "").strip()
     if not t:
         return []
-    chunks = []
-    i = 0
-    n = len(t)
-    step = max(1, chunk_chars - overlap)
-    while i < n:
-        chunk = t[i:i + chunk_chars].strip()
-        if chunk:
-            chunks.append(chunk)
-        i += step
+
+    sents = re.split(r"(?<=[\.\!\?\…])\s+|\n+", t)
+    sents = [s.strip() for s in sents if s and s.strip()]
+
+    chunks: List[str] = []
+    cur = ""
+
+    def push_current():
+        nonlocal cur
+        cc = cur.strip()
+        if cc:
+            chunks.append(cc)
+        cur = ""
+
+    for s in sents:
+        if not cur:
+            if len(s) <= max_chars:
+                cur = s
+            else:
+                for i in range(0, len(s), max_chars):
+                    part = s[i:i + max_chars].strip()
+                    if part:
+                        chunks.append(part)
+        else:
+            if len(cur) + 1 + len(s) <= max_chars:
+                cur = cur + " " + s
+            else:
+                push_current()
+                if len(s) <= max_chars:
+                    cur = s
+                else:
+                    for i in range(0, len(s), max_chars):
+                        part = s[i:i + max_chars].strip()
+                        if part:
+                            chunks.append(part)
+
+    push_current()
     return chunks
-
-
-def sanitize_title_for_tts(title: str) -> str:
-    if not title:
-        return ""
-    return re.sub(r"[:\-+/]", ",", title)
-
-
-def extract_arxiv_id(entry_id: str) -> str:
-    if not entry_id:
-        return ""
-    m = re.search(r"arxiv\.org/abs/([^v]+)(?:v\d+)?", entry_id)
-    if m:
-        return m.group(1).strip()
-    return entry_id.rsplit("/", 1)[-1].replace("v1", "").replace("v2", "").strip()
-
-
-def safe_lower(s: str) -> str:
-    return (s or "").lower()
-
-
-def format_kst_date(now_kst: datetime.datetime) -> str:
-    return f"{now_kst.month}월 {now_kst.day}일"
-
-
-def format_kst_date_iso(now_kst: datetime.datetime) -> str:
-    return now_kst.strftime("%Y-%m-%d")
 
 
 # =========================
@@ -197,8 +231,10 @@ def fetch_arxiv_candidates_in_window(start_et: datetime.datetime, end_et: dateti
     candidates = []
     for p in aclient.results(search):
         pub_et = p.published.astimezone(ET_TZ)
+
         if pub_et < start_et:
             break
+
         if start_et <= pub_et < end_et:
             candidates.append(p)
 
@@ -206,24 +242,13 @@ def fetch_arxiv_candidates_in_window(start_et: datetime.datetime, end_et: dateti
 
 
 # =========================
-# STAGE 0: LIGHT PRE-SCORE
-# =========================
-def prescore_text(p: Any) -> float:
-    title = safe_lower(p.title)
-    abst = safe_lower(p.summary)
-    text = title + " " + abst
-
-    code_hit = any(h in text for h in CODE_HINTS)
-
-    score = 0.0
-    score += 6.0 if code_hit else 0.0
-    score -= min(hype_hits * 2.0, 6.0)
-    return score
-
-
-# =========================
 # SEMANTIC SCHOLAR
 # =========================
+_s2_session = requests.Session()
+_s2_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+_s2_last_call_ts = 0.0
+
+
 def s2_headers() -> Dict[str, str]:
     h = {"User-Agent": "cv-papers-podcast-bot/1.0"}
     if SEMANTIC_SCHOLAR_API_KEY:
@@ -231,18 +256,73 @@ def s2_headers() -> Dict[str, str]:
     return h
 
 
+def _sleep_backoff(attempt: int, retry_after: Optional[float] = None) -> None:
+    if retry_after is not None and retry_after > 0:
+        time.sleep(retry_after)
+        return
+    base = S2_BACKOFF_BASE_SEC * (2 ** max(0, attempt - 1))
+    time.sleep(base + (S2_JITTER_SEC * (attempt % 3)))
+
+
+def _respect_min_interval() -> None:
+    global _s2_last_call_ts
+    now = time.time()
+    elapsed = now - _s2_last_call_ts
+    if elapsed < S2_MIN_INTERVAL_SEC:
+        time.sleep(S2_MIN_INTERVAL_SEC - elapsed)
+    _s2_last_call_ts = time.time()
+
+
 def fetch_s2_paper_by_arxiv(arxiv_id: str) -> Optional[Dict[str, Any]]:
     if not arxiv_id:
         return None
+
+    if arxiv_id in _s2_cache:
+        return _s2_cache[arxiv_id]
+
     url = f"{S2_BASE}/paper/ARXIV:{arxiv_id}"
     fields = "title,authors.name,authors.hIndex,authors.paperCount,externalIds,url"
-    try:
-        r = requests.get(url, headers=s2_headers(), params={"fields": fields}, timeout=S2_TIMEOUT)
-        if r.status_code != 200:
+
+    for attempt in range(1, S2_MAX_RETRIES + 1):
+        try:
+            _respect_min_interval()
+            r = _s2_session.get(
+                url,
+                headers=s2_headers(),
+                params={"fields": fields},
+                timeout=S2_TIMEOUT
+            )
+
+            if r.status_code == 200:
+                js = r.json()
+                _s2_cache[arxiv_id] = js
+                return js
+
+            if r.status_code == 429:
+                ra = r.headers.get("Retry-After")
+                retry_after = None
+                if ra:
+                    try:
+                        retry_after = float(ra)
+                    except Exception:
+                        retry_after = None
+                _sleep_backoff(attempt, retry_after=retry_after)
+                continue
+
+            if 500 <= r.status_code <= 599:
+                _sleep_backoff(attempt, retry_after=None)
+                continue
+
+            _s2_cache[arxiv_id] = None
             return None
-        return r.json()
-    except Exception:
-        return None
+
+        except requests.exceptions.Timeout:
+            _sleep_backoff(attempt, retry_after=None)
+        except Exception:
+            _sleep_backoff(attempt, retry_after=None)
+
+    _s2_cache[arxiv_id] = None
+    return None
 
 
 def compute_author_score(s2: Optional[Dict[str, Any]]) -> float:
@@ -292,26 +372,12 @@ def compute_author_score(s2: Optional[Dict[str, Any]]) -> float:
     return max(0.0, min(70.0, base))
 
 
-def compute_content_score(p: Any) -> float:
+def compute_code_openness_score(p: Any) -> float:
     title = safe_lower(p.title)
     abst = safe_lower(p.summary)
     text = title + " " + abst
-
     code_hit = any(h in text for h in CODE_HINTS)
-
     return 10.0 if code_hit else 0.0
-
-
-
-def compute_penalty(p: Any) -> float:
-    title = safe_lower(p.title)
-    abst = safe_lower(p.summary)
-    text = title + " " + abst
-
-    hype_hits = sum(1 for k in NEGATIVE_HYPE if k in text)
-    if hype_hits == 0:
-        return 0.0
-    return -min(10.0, hype_hits * 3.0)
 
 
 def score_paper(p: Any) -> ScoredPaper:
@@ -319,17 +385,18 @@ def score_paper(p: Any) -> ScoredPaper:
     s2 = fetch_s2_paper_by_arxiv(arxiv_id)
 
     author = compute_author_score(s2)
-    content = compute_content_score(p)
-    penalty = 0.0
-    
-    total = author + content + penalty
-    total = max(0.0, min(100.0, total * (100.0 / 80.0)))
+    code_open = compute_code_openness_score(p)
+
+    total_raw = author + code_open
+    total = max(0.0, min(100.0, total_raw * (100.0 / 80.0)))
+
+    s2_ok = 1.0 if (s2 is not None) else 0.0
 
     return ScoredPaper(
         paper=p,
         arxiv_id=arxiv_id,
         score=total,
-        score_detail={"author": author, "content": content, "penalty": penalty}
+        score_detail={"author": author, "code_open": code_open, "s2_ok": s2_ok}
     )
 
 
@@ -347,7 +414,7 @@ def prompt_summary_and_3min(top_papers: List[Any], kst_date_iso: str, kst_date_k
     papers_info = build_papers_info(top_papers)
     return f"""
 오늘은 {kst_date_korean}이며, 이 날짜 기준으로 서술하십시오.
-아래는 arXiv cs.CV에서 {kst_date_iso}자 기준으로 선별된 상위 {len(top_papers)}편 논문입니다.
+아래는 아카이브 cs.CV에서 {kst_date_iso}자 기준으로 선별된 상위 {len(top_papers)}편 논문입니다.
 (중요: 아래에 포함된 논문만 요약 및 오디오 대본을 작성하십시오. 나머지 논문은 절대 다루지 마십시오.)
 
 {papers_info}
@@ -375,12 +442,8 @@ def prompt_summary_and_3min(top_papers: List[Any], kst_date_iso: str, kst_date_k
 
 마무리 규칙
 - 모든 논문 설명이 끝난 뒤, 아래 톤의 아웃트로 멘트를 한 문단으로 추가하십시오.
-- 감사 인사나 일상적인 인삿말은 사용하지 마십시오.
+- 감사 인사나 일상적인 인삿말은 사용하지 말아 주십시오.
 - 더 자세한 내용이 전체 브리핑에 있다는 점을 자연스럽게 안내하십시오.
-
-아웃트로 톤 예시
-"보다 자세한 내용은 전체 브리핑에서 이어서 다룹니다.
-지금까지 오늘의 컴퓨터 비전 논문 3분 핵심 요약이었습니다."
 
 출력 형식
 [요약]
@@ -448,8 +511,8 @@ def call_gpt_text(system_text: str, user_text: str, max_tokens: int) -> str:
 # =========================
 # TTS
 # =========================
-def synthesize_tts_to_audio(text: str, tts_chunk_chars: int = 2000, overlap: int = 0) -> AudioSegment:
-    chunks = chunk_text_by_chars(text, chunk_chars=tts_chunk_chars, overlap=overlap)
+def synthesize_tts_to_audio(text: str, tts_chunk_chars: int = 1700) -> AudioSegment:
+    chunks = chunk_text_by_sentences(text, max_chars=tts_chunk_chars)
     combined = AudioSegment.empty()
     for chunk in chunks:
         audio_part_response = client.audio.speech.create(
@@ -490,7 +553,7 @@ def assemble_radio_script(
 
     intro = (
         "안녕하세요, 아이알씨브이 랩실의 수석 연구 비서입니다.\n"
-        f"지금부터 {date_korean}자 arXiv에 업데이트된 컴퓨터 비전 논문들을 브리핑 드리겠습니다."
+        f"지금부터 {date_korean}자 아카이브에 업데이트된 컴퓨터 비전 논문들을 브리핑 해드리겠습니다."
     )
     outro = "이상으로 오늘의 전체 브리핑을 마칩니다."
 
@@ -500,8 +563,8 @@ def assemble_radio_script(
 
     script_parts = [intro, ""]
     for i, (title, body) in enumerate(all_blocks, start=1):
-        title_tts = sanitize_title_for_tts(title)
         ordinal = number_to_korean_ordinal(i)
+        title_tts = sanitize_title_for_tts(title)
         script_parts.append(f"{ordinal} 논문입니다.")
         script_parts.append(f"논문 제목은 {title_tts} 입니다.")
         script_parts.append(body)
@@ -529,7 +592,7 @@ def run_bot():
     now_kst = datetime.datetime.now(SEOUL_TZ)
     now_et = now_kst.astimezone(ET_TZ)
 
-    start_et, end_et, announce_date = compute_announce_window_et(now_et)
+    start_et, end_et, _announce_date = compute_announce_window_et(now_et)
 
     kst_date_iso = format_kst_date_iso(now_kst)
     kst_date_korean = format_kst_date(now_kst)
@@ -539,12 +602,8 @@ def run_bot():
         print("해당 announce window에서 새로 잡힌 논문이 없습니다.")
         return
 
-    prescored = [(p, prescore_text(p)) for p in candidates]
-    prescored.sort(key=lambda x: x[1], reverse=True)
-    preselected = [p for (p, _) in prescored[:min(PRESELECT_K, len(prescored))]]
-
     scored: List[ScoredPaper] = []
-    for p in preselected:
+    for p in candidates:
         scored.append(score_paper(p))
 
     scored.sort(key=lambda sp: sp.score, reverse=True)
@@ -594,19 +653,11 @@ def run_bot():
     full_file_path = os.path.join(audio_dir, file_name_full)
     full_file_path_3min = os.path.join(audio_dir, file_name_3min)
 
-    combined_audio = synthesize_tts_to_audio(
-        audio_script_full,
-        tts_chunk_chars=TTS_CHUNK_CHARS,
-        overlap=TTS_CHUNK_OVERLAP
-    )
+    combined_audio = synthesize_tts_to_audio(audio_script_full, tts_chunk_chars=TTS_CHUNK_CHARS)
     combined_audio.export(full_file_path, format="mp3")
 
     if audio_script_3min.strip():
-        audio_3min = synthesize_tts_to_audio(
-            audio_script_3min,
-            tts_chunk_chars=TTS_CHUNK_CHARS,
-            overlap=TTS_CHUNK_OVERLAP
-        )
+        audio_3min = synthesize_tts_to_audio(audio_script_3min, tts_chunk_chars=TTS_CHUNK_CHARS)
         audio_3min.export(full_file_path_3min, format="mp3")
     else:
         open(full_file_path_3min, "wb").close()
@@ -642,7 +693,11 @@ def run_bot():
 
     for rank, sp in enumerate(top, start=1):
         p = sp.paper
-        line = f"{rank}. {p.title}  (score={sp.score:.1f}, author={sp.score_detail['author']:.1f}, content={sp.score_detail['content']:.1f})"
+        line = (
+            f"{rank}. {p.title}  "
+            f"(score={sp.score:.1f}, author={sp.score_detail['author']:.1f}, "
+            f"code_open={sp.score_detail['code_open']:.1f}, s2_ok={sp.score_detail['s2_ok']:.0f})"
+        )
         notion_children.append({
             "object": "block",
             "type": "bulleted_list_item",
@@ -669,7 +724,7 @@ def run_bot():
         children=notion_children
     )
 
-    print(f"완료: candidates={len(candidates)}, preselected={len(preselected)}, saved_top={len(top_papers)}")
+    print(f"완료: candidates={len(candidates)}, scored_all={len(scored)}, saved_top={len(top_papers)}")
 
 
 if __name__ == "__main__":

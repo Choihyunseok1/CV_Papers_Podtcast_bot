@@ -2,11 +2,13 @@ import os
 import arxiv
 import openai
 from notion_client import Client
+from zoneinfo import ZoneInfo
 import datetime
 from pytz import timezone
 from pydub import AudioSegment
 import io
 import re
+
 
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -30,6 +32,17 @@ TTS_SPEED = 1.25
 TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
 
+def is_us_dst_now():
+    ny = ZoneInfo("America/New_York")
+    now_ny = datetime.datetime.now(ny)
+    return bool(now_ny.dst())
+
+def should_run_now_kst(seoul_tz):
+    now = datetime.datetime.now(seoul_tz)
+    desired_hour = 9 if is_us_dst_now() else 10
+    # GitHub cron이 09:01 / 10:01에 둘 다 트리거하므로,
+    # 지금 시간이 원하는 시간대가 아니면 종료
+    return (now.hour == desired_hour)
 
 def split_notion_text(text, max_len=1900):
     text = (text or "").strip()
@@ -64,7 +77,7 @@ def build_papers_info(papers):
 def prompt_summary_and_3min(valid_papers):
     papers_info = build_papers_info(valid_papers)
     return f"""
-아래는 어제 저녁부터 오늘 새벽 사이에 새로 발표된 {len(valid_papers)}개의 컴퓨터 비전 논문입니다.
+아래는 오늘 오전 8시 이후(한국시간) arXiv에 새로 공개된 {len(valid_papers)}개의 컴퓨터 비전 논문입니다.
 
 {papers_info}
 
@@ -140,7 +153,6 @@ E. 한계와 추후 과제
 F. 실전 감상 포인트 2개
 
 언어 규칙:
-- 기술 약어(CNN, ViT, SOTA 등)는 한글 발음으로만 표기할 것.
 - 쉼표(,)로 호흡, 마침표(.)로 강조.
 - CNN, ViT, GAN, SOTA 등 약어는 영문 그대로 사용할 것.
 - 동료 연구자에게 설명하듯 차분한 구어체.
@@ -262,8 +274,12 @@ def run_bot():
     os.makedirs(audio_dir, exist_ok=True)
 
     seoul_tz = timezone("Asia/Seoul")
+    if not should_run_now_kst(seoul_tz):
+        print("DST 조건에 맞는 실행 시간이 아니라 종료합니다.")
+        return
     now = datetime.datetime.now(seoul_tz)
-    yesterday_6pm = (now - datetime.timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+    
+    today_8am = now.replace(hour=8, minute=0, second=0, microsecond=0)
 
     search = arxiv.Search(
         query="cat:cs.CV",
@@ -274,7 +290,7 @@ def run_bot():
     valid_papers = []
     for p in search.results():
         p_date = p.published.astimezone(seoul_tz)
-        if p_date > yesterday_6pm:
+        if today_8am <= p_date <= now:
             valid_papers.append(p)
 
     if not valid_papers:

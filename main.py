@@ -614,7 +614,7 @@ def run_bot():
     audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_full}"
     audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
 
-    page_title = f"{now_kst.strftime('%Y-%m-%d')} 모닝 브리핑 Top{len(top_papers)}"
+    page_title = f"{now_kst.strftime('%Y-%m-%d')} 모닝 브리핑 논문 {len(top_papers)}개"
 
     notion_children = [
         {

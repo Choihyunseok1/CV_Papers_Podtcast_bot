@@ -19,7 +19,6 @@ GITHUB_REPO = "CV_Papers_Podtcast_bot"
 notion = Client(auth=NOTION_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-
 BATCH_SIZE_FULL = 2
 MAX_OUT_TOKENS_SUMMARY = 4000
 MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
@@ -32,33 +31,7 @@ TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
 
 
-def should_run_on_arxiv_announce_day():
-    """
-    arXiv announce(배포)는 보통 Eastern Time 기준 20:00에 이루어지고,
-    금/토(Eastern)에는 announce가 없습니다.
-    따라서 실행 시각 기준 Eastern 날짜가 금/토면 라디오 진행(생성)을 하지 않습니다.
-    """
-    et = ZoneInfo("America/New_York")
-    now_et = datetime.datetime.now(et)
-
-    print("========== CV Daily Briefing Bot START ==========")
-    print(f"[TIME] Now (ET): {now_et}")
-
-    # weekday(): Mon=0 ... Sun=6
-    # announce 없음: Fri(4), Sat(5)
-    if now_et.weekday() in (4, 5):
-        print("[WINDOW] No arXiv announcement today (ET Fri/Sat). Exit.")
-        return False
-
-    print("[WINDOW] arXiv announce day (ET) -> proceed")
-    return True
-
-
 def medical_penalty_score(title, abstract):
-    """
-    Medical/Bio만 강하게 감점.
-    title+abstract에서 medical/bio imaging 신호 키워드가 2개 이상이면 -25점.
-    """
     text = f"{title or ''} {abstract or ''}".lower()
 
     keywords = [
@@ -125,7 +98,6 @@ def prompt_summary_and_3min(valid_papers):
 - 각 논문 요약 시작시 '1. (논문제목)' 식으로 앞에 번호만 붙여 진행할 것
 - 논문들 사이는 줄바꿈으로 구분할 것.
 
-
 2. [3분대본]
 - "시간이 없으신 분들을 위한 3분 핵심 요약입니다"로 시작할 것.
 - 모든 논문을 빠짐없이 포함할 것.
@@ -137,14 +109,13 @@ def prompt_summary_and_3min(valid_papers):
 - 논문의 공식 제목은 반드시 영문으로 표기하되, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
 - CNN, ViT, GAN, SOTA 등 약어는 영문 그대로 사용할 것.
 - 전문 기술 용어(diffusion, transformer, attention, self-attention, cross-attention, latent, encoder, decoder, backbone, head, neck, pipeline, architecture, framework, module, block, layer, stage, feature, representation, embedding, token, patch, pixel, resolution, scale, multi-scale, spatial, temporal, semantic, instance, object, bounding box, mask, classification, regression, detection, segmentation, tracking, matching, retrieval, generation, reconstruction, prediction, training, inference, optimization, loss, objective, gradient, backpropagation, scheduler, warmup, regularization, overfitting, underfitting, convergence, likelihood, log-likelihood, prior, posterior, sampling, denoising, noise, variance, distribution, gaussian, entropy, kl-divergence, dataset, benchmark, metric, accuracy, precision, recall, f-score, mean average precision, intersection over union, foundation model, large-scale, multi-modal, vision-language, prompt, prompting, alignment, zero-shot, few-shot, in-context learning, parameter-efficient tuning, point cloud, voxel, mesh, depth, pose, camera, ray, rendering, video, frame, motion, optical flow, reinforcement learning, policy, value function, reward, exploration, exploitation, environment, agent, state, action, episode, timestep, imitation learning, self-supervised learning, supervised learning, unsupervised learning, contrastive learning, pretraining, fine-tuning, transfer learning, curriculum learning, data augmentation, normalization, batch normalization, layer normalization, residual connection, skip connection, attention map, positional encoding, query, key, value, softmax, temperature, logits, probability, score, confidence, threshold, calibration, robustness, generalization, scalability, efficiency, latency, throughput, memory, parameter, hyperparameter, initialization, seed, reproducibility, ablation study, baseline, state-of-the-art, sota, comparison, improvement, gain, trade-off, limitation, future work 등)는 번역하지 말고 반드시 영어 원어 그대로 사용할 것.
-
 - 쉼표(,)를 충분히 사용해 호흡 지점을 표시할 것.
 - 동료 연구자에게 설명하듯 차분한 구어체.
 - 전체 브리핑은 반드시 공적인 라디오 방송 톤의 존댓말로 작성할 것.
 - 반말, 구어체 축약, 친근한 대화체(예: ~해요, ~했죠)는 사용하지 말 것.
 - 연구 비서가 공식적으로 설명하는 말투를 유지할 것.
 
-    [마무리 규칙]
+[마무리 규칙]
 - 모든 논문 설명이 끝난 뒤, 반드시 아래 톤의 아웃트로 멘트를 한 문단으로 추가할 것.
 - 감사 인사나 일상적인 인삿말은 사용하지 말 것.
 - 더 자세한 내용이 전체 브리핑에 있다는 점을 자연스럽게 안내할 것.
@@ -220,10 +191,8 @@ def call_gpt_text(system_text, user_text, max_tokens):
 
 def synthesize_tts_to_audio(text, tts_chunk_chars=2000, overlap=0):
     chunks = chunk_text_by_chars(text, chunk_chars=tts_chunk_chars, overlap=overlap)
-    print(f"[TTS] Total chunks: {len(chunks)} (chunk_chars={tts_chunk_chars}, overlap={overlap})")
     combined = AudioSegment.empty()
-    for idx, chunk in enumerate(chunks, start=1):
-        print(f"[TTS] Chunk {idx}/{len(chunks)}: {len(chunk)} chars")
+    for chunk in chunks:
         audio_part_response = client.audio.speech.create(
             model=TTS_MODEL,
             voice=TTS_VOICE,
@@ -305,78 +274,118 @@ def assemble_radio_script(full_batches_text, total_papers):
     return "\n".join(script_parts).strip()
 
 
+def get_submission_window_et(now_et):
+    wd = now_et.weekday()  # Mon 0 Tue 1 Wed 2 Thu 3 Fri 4 Sat 5 Sun 6
+
+    if wd in (4, 5):
+        return None, None
+
+    today_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def at_14(d):
+        return d.replace(hour=14, minute=0, second=0, microsecond=0)
+
+    if wd == 1:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 2:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 3:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 6:
+        end_et = at_14(today_et - datetime.timedelta(days=2))
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 0:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=3)
+        return start_et, end_et
+
+    return None, None
+
+
 def run_bot():
     base_path = os.path.dirname(os.path.abspath(__file__))
     audio_dir = os.path.join(base_path, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
-    # 2) arXiv 업데이트(announce) 날에만 라디오 진행
-    if not should_run_on_arxiv_announce_day():
-        print("arXiv announce가 없는 날(Eastern 기준 금/토)이라 종료합니다.")
-        print("========== CV Daily Briefing Bot END ==========")
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.datetime.now(et)
+
+    window_start_et, window_end_et = get_submission_window_et(now_et)
+    print("[DEBUG] Submission window (ET)")
+    print(f"[DEBUG] window_start_et = {window_start_et}")
+    print(f"[DEBUG] window_end_et   = {window_end_et}")
+
+    if window_start_et is None:
+        print("오늘은 arXiv announce가 없는 날(ET 기준 금 토)이라 종료합니다.")
         return
 
     seoul_tz = timezone("Asia/Seoul")
     now = datetime.datetime.now(seoul_tz)
-    yesterday_6pm = (now - datetime.timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
-
-    print(f"[TIME] Now (KST): {now}")
-    print(f"[WINDOW] KST filter start (published >): {yesterday_6pm}")
 
     search = arxiv.Search(
         query="cat:cs.CV",
-        max_results=10,
+        max_results=200,
         sort_by=arxiv.SortCriterion.SubmittedDate
     )
+    
+    print("[DEBUG] arXiv search config")
+    print("[DEBUG] query=cat:cs.CV")
+    print("[DEBUG] max_results=200")
+    print("[DEBUG] sort_by=SubmittedDate(desc)")
 
-    print("[ARXIV] Querying arXiv")
-    print("[ARXIV] Category: cs.CV")
-    print("[ARXIV] Max results requested: 10")
-    print("[ARXIV] Sort by: SubmittedDate (desc)")
+
+    arxiv_client = arxiv.Client()
 
     candidates = []
-    scanned = 0
-    for p in search.results():
-        scanned += 1
-        p_date = p.published.astimezone(seoul_tz)
-        if p_date > yesterday_6pm:
+    total_scanned = 0
+    for p in arxiv_client.results(search):
+        total_scanned += 1
+        p_submitted_et = p.published.astimezone(et)
+    
+        print(f"[DEBUG][SCAN] {p.title[:60]}")
+        print(f"[DEBUG][SCAN] submitted_et = {p_submitted_et}")
+    
+        if window_start_et <= p_submitted_et < window_end_et:
+            print("[DEBUG][SCAN] -> IN WINDOW")
             candidates.append(p)
-
-    print(f"[ARXIV] Papers scanned from arXiv: {scanned}")
-    print(f"[ARXIV] Papers after time-window filtering: {len(candidates)}")
+        else:
+            print("[DEBUG][SCAN] -> OUT OF WINDOW")
+            
+    print(f"[DEBUG] Total scanned papers = {total_scanned}")
+    print(f"[DEBUG] Papers in submission window = {len(candidates)}")
 
     if not candidates:
-        print("해당 announce window에서 새로 올라온 논문이 없습니다.")
-        print("========== CV Daily Briefing Bot END ==========")
-        return
+        print("해당 submission window에서 새로 올라온 논문이 없습니다.")
+        print(f"window(ET): {window_start_et} ~ {window_end_et}")
+        print("[DEBUG] No paper satisfied:")
+        print("[DEBUG] window_start_et <= published_et < window_end_et")
 
-    # 1) Medical/Bio만 강하게 감점 로직 포함
-    print("[SCORING] Start scoring papers (medical penalty applied)")
+        return
 
     scored = []
     for p in candidates:
         penalty = medical_penalty_score(p.title, p.summary)
-        # 기존 동작을 크게 바꾸지 않기 위해, 후보 10개 내에서만 페널티 기반 재정렬 후 Top10 유지
         score = 100 - penalty
         scored.append((score, penalty, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     valid_papers = [x[2] for x in scored[:10]]
 
-    print(f"[SCORING] Candidates scored: {len(scored)}")
-    print(f"[SCORING] Final selected papers: {len(valid_papers)}")
-    for i, p in enumerate(valid_papers, start=1):
-        print(f"[SELECTED {i}] {p.title}")
-
     system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 요약과 3분 대본을 작성해줘."
     system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."
 
     user_summary = prompt_summary_and_3min(valid_papers)
-
-    print("[GPT] Generating summary + 3min script")
-    print(f"[GPT] Target papers: {len(valid_papers)}")
-    print(f"[GPT] Max output tokens: {MAX_OUT_TOKENS_SUMMARY}")
-
     summary_out = call_gpt_text(system_summary, user_summary, MAX_OUT_TOKENS_SUMMARY)
 
     if "[3분대본]" in summary_out:
@@ -389,29 +398,14 @@ def run_bot():
     paper_batches = [valid_papers[i:i + BATCH_SIZE_FULL] for i in range(0, len(valid_papers), BATCH_SIZE_FULL)]
     total_batches = len(paper_batches)
 
-    print("[GPT] Generating full body batches")
-    print(f"[GPT] Batch size: {BATCH_SIZE_FULL}")
-    print(f"[GPT] Total batches: {total_batches}")
-    print(f"[GPT] Max output tokens per batch: {MAX_OUT_TOKENS_FULL_PER_BATCH}")
-
     full_batches_text = []
     for idx, batch in enumerate(paper_batches, start=1):
         start_index = (idx - 1) * BATCH_SIZE_FULL + 1
-        end_index = start_index + len(batch) - 1
-        print(f"[GPT][BATCH {idx}/{total_batches}] Paper index range: {start_index} ~ {end_index}")
         user_full = prompt_full_body_for_batch(batch, idx, total_batches, start_index)
         batch_text = call_gpt_text(system_full, user_full, MAX_OUT_TOKENS_FULL_PER_BATCH)
         full_batches_text.append(batch_text)
 
-    print("[SCRIPT] Assembling full radio script from batch outputs")
     audio_script_full = assemble_radio_script(full_batches_text, total_papers=len(valid_papers))
-
-    print("[TTS] Generating full briefing audio")
-    print(f"[TTS] Model: {TTS_MODEL}")
-    print(f"[TTS] Voice: {TTS_VOICE}")
-    print(f"[TTS] Speed: {TTS_SPEED}")
-    print(f"[TTS] Chunk chars: {TTS_CHUNK_CHARS}")
-    print(f"[TTS] Chunk overlap: {TTS_CHUNK_OVERLAP}")
 
     combined_audio = synthesize_tts_to_audio(
         audio_script_full,
@@ -423,34 +417,23 @@ def run_bot():
     file_name_full = f"CV_Daily_Briefing_{today_date}.mp3"
     full_file_path = os.path.join(audio_dir, file_name_full)
     combined_audio.export(full_file_path, format="mp3")
-    print(f"[FILE] Full briefing audio saved: {full_file_path}")
 
     file_name_3min = f"3Min_Summary_{today_date}.mp3"
     full_file_path_3min = os.path.join(audio_dir, file_name_3min)
 
     if audio_script_3min.strip():
-        print("[TTS] Generating 3-minute summary audio")
         audio_3min = synthesize_tts_to_audio(
             audio_script_3min,
             tts_chunk_chars=TTS_CHUNK_CHARS,
             overlap=TTS_CHUNK_OVERLAP
         )
         audio_3min.export(full_file_path_3min, format="mp3")
-        print(f"[FILE] 3-min summary audio saved: {full_file_path_3min}")
     else:
-        print("[TTS] No 3-minute summary script generated -> creating empty file")
         open(full_file_path_3min, "wb").close()
-        print(f"[FILE] 3-min summary audio saved (empty): {full_file_path_3min}")
 
     audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_full}"
     audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
     page_title = f"{now.strftime('%Y-%m-%d')} 모닝 브리핑 ({len(valid_papers)}개)"
-
-    print("[NOTION] Creating Notion page")
-    print(f"[NOTION] Page title: {page_title}")
-    print(f"[NOTION] Number of papers linked: {len(valid_papers)}")
-    print(f"[NOTION] Audio URL (full): {audio_url}")
-    print(f"[NOTION] Audio URL (3min): {audio_url_3min}")
 
     notion_children = [
         {"object": "block", "type": "heading_2",
@@ -514,7 +497,6 @@ def run_bot():
     )
 
     print(f"통합 브리핑 생성 완료: {len(valid_papers)}개의 논문")
-    print("========== CV Daily Briefing Bot END ==========")
 
 
 if __name__ == "__main__":

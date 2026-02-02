@@ -8,6 +8,8 @@ from pydub import AudioSegment
 import io
 import re
 from zoneinfo import ZoneInfo
+import time
+import requests
 
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -29,6 +31,184 @@ TTS_SPEED = 1.25
 
 TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
+
+AUTHOR_SCORE_ENABLED = True
+
+SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+SEMANTIC_SCHOLAR_BASE_URL = "https://api.semanticscholar.org/graph/v1"
+
+AUTHOR_WEIGHT = 10.0
+AUTHOR_HINDEX_CAP = 80.0
+AUTHOR_MIN_REQUEST_INTERVAL_SEC = 0.15
+AUTHOR_HTTP_TIMEOUT_SEC = 10
+AUTHOR_HTTP_RETRIES = 3
+AUTHOR_HTTP_BACKOFF_SEC = 0.6
+
+AUTHOR_AGG_METHOD = "max"
+AUTHOR_SCORE_SOURCE = "hindex"
+
+
+_author_cache_by_name = {}
+_author_last_request_time = 0.0
+
+
+def _semantic_scholar_headers():
+    headers = {
+        "Accept": "application/json"
+    }
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+    return headers
+
+
+def _rate_limit_sleep():
+    global _author_last_request_time
+    now = time.time()
+    elapsed = now - _author_last_request_time
+    if elapsed < AUTHOR_MIN_REQUEST_INTERVAL_SEC:
+        time.sleep(AUTHOR_MIN_REQUEST_INTERVAL_SEC - elapsed)
+    _author_last_request_time = time.time()
+
+
+def _http_get_json(url, params=None, timeout_sec=10, retries=3):
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            _rate_limit_sleep()
+            r = requests.get(
+                url,
+                params=params,
+                headers=_semantic_scholar_headers(),
+                timeout=timeout_sec
+            )
+            if r.status_code == 200:
+                return r.json()
+            last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            last_err = e
+
+        time.sleep(AUTHOR_HTTP_BACKOFF_SEC * attempt)
+
+    raise last_err
+
+
+def _ss_find_author_id_by_name(author_name):
+    author_name = (author_name or "").strip()
+    if not author_name:
+        return None
+
+    cache = _author_cache_by_name.get(author_name)
+    if cache and "authorId" in cache:
+        return cache["authorId"]
+
+    url = f"{SEMANTIC_SCHOLAR_BASE_URL}/author/search"
+    params = {
+        "query": author_name,
+        "limit": 1,
+        "fields": "authorId,name"
+    }
+    data = _http_get_json(
+        url,
+        params=params,
+        timeout_sec=AUTHOR_HTTP_TIMEOUT_SEC,
+        retries=AUTHOR_HTTP_RETRIES
+    )
+    items = data.get("data", []) if isinstance(data, dict) else []
+    if not items:
+        _author_cache_by_name[author_name] = {"authorId": None}
+        return None
+
+    author_id = items[0].get("authorId")
+    _author_cache_by_name[author_name] = {"authorId": author_id}
+    return author_id
+
+
+def _ss_get_author_metrics(author_id):
+    if not author_id:
+        return None
+
+    url = f"{SEMANTIC_SCHOLAR_BASE_URL}/author/{author_id}"
+    params = {
+        "fields": "name,hIndex,citationCount,paperCount"
+    }
+    data = _http_get_json(
+        url,
+        params=params,
+        timeout_sec=AUTHOR_HTTP_TIMEOUT_SEC,
+        retries=AUTHOR_HTTP_RETRIES
+    )
+    if not isinstance(data, dict):
+        return None
+
+    return {
+        "name": data.get("name"),
+        "hIndex": float(data.get("hIndex") or 0.0),
+        "citationCount": float(data.get("citationCount") or 0.0),
+        "paperCount": float(data.get("paperCount") or 0.0),
+    }
+
+
+def get_author_score_for_paper(arxiv_paper):
+    if not AUTHOR_SCORE_ENABLED:
+        return 0.0, []
+
+    authors = getattr(arxiv_paper, "authors", None) or []
+    if not authors:
+        return 0.0, []
+
+    author_scores = []
+    author_debug = []
+
+    for a in authors:
+        name = str(a).strip()
+        if not name:
+            continue
+
+        if name in _author_cache_by_name and "metrics" in _author_cache_by_name[name]:
+            metrics = _author_cache_by_name[name]["metrics"]
+        else:
+            try:
+                author_id = _ss_find_author_id_by_name(name)
+                metrics = _ss_get_author_metrics(author_id) if author_id else None
+            except Exception:
+                metrics = None
+
+            if name not in _author_cache_by_name:
+                _author_cache_by_name[name] = {}
+            _author_cache_by_name[name]["metrics"] = metrics
+
+        if not metrics:
+            author_debug.append({"name": name, "hIndex": 0.0, "citationCount": 0.0, "paperCount": 0.0})
+            author_scores.append(0.0)
+            continue
+
+        hidx = float(metrics.get("hIndex") or 0.0)
+        ctc = float(metrics.get("citationCount") or 0.0)
+        pc = float(metrics.get("paperCount") or 0.0)
+
+        if AUTHOR_SCORE_SOURCE == "hindex":
+            raw = hidx
+        elif AUTHOR_SCORE_SOURCE == "citations":
+            raw = ctc
+        elif AUTHOR_SCORE_SOURCE == "papers":
+            raw = pc
+        else:
+            raw = hidx
+
+        author_debug.append({"name": name, "hIndex": hidx, "citationCount": ctc, "paperCount": pc})
+        author_scores.append(raw)
+
+    if not author_scores:
+        return 0.0, author_debug
+
+    if AUTHOR_AGG_METHOD == "mean":
+        agg = sum(author_scores) / max(1, len(author_scores))
+    else:
+        agg = max(author_scores)
+
+    norm = min(max(agg, 0.0), AUTHOR_HINDEX_CAP) / max(1.0, AUTHOR_HINDEX_CAP)
+
+    return float(norm), author_debug
 
 
 def medical_penalty_score(title, abstract):
@@ -275,7 +455,7 @@ def assemble_radio_script(full_batches_text, total_papers):
 
 
 def get_submission_window_et(now_et):
-    wd = now_et.weekday()  # Mon 0 Tue 1 Wed 2 Thu 3 Fri 4 Sat 5 Sun 6
+    wd = now_et.weekday()
 
     if wd in (4, 5):
         return None, None
@@ -338,12 +518,11 @@ def run_bot():
         max_results=200,
         sort_by=arxiv.SortCriterion.SubmittedDate
     )
-    
+
     print("[DEBUG] arXiv search config")
     print("[DEBUG] query=cat:cs.CV")
     print("[DEBUG] max_results=200")
     print("[DEBUG] sort_by=SubmittedDate(desc)")
-
 
     arxiv_client = arxiv.Client()
 
@@ -352,16 +531,16 @@ def run_bot():
     for p in arxiv_client.results(search):
         total_scanned += 1
         p_submitted_et = p.published.astimezone(et)
-    
+
         print(f"[DEBUG][SCAN] {p.title[:60]}")
         print(f"[DEBUG][SCAN] submitted_et = {p_submitted_et}")
-    
+
         if window_start_et <= p_submitted_et < window_end_et:
             print("[DEBUG][SCAN] -> IN WINDOW")
             candidates.append(p)
         else:
             print("[DEBUG][SCAN] -> OUT OF WINDOW")
-            
+
     print(f"[DEBUG] Total scanned papers = {total_scanned}")
     print(f"[DEBUG] Papers in submission window = {len(candidates)}")
 
@@ -370,17 +549,35 @@ def run_bot():
         print(f"window(ET): {window_start_et} ~ {window_end_et}")
         print("[DEBUG] No paper satisfied:")
         print("[DEBUG] window_start_et <= published_et < window_end_et")
-
         return
 
     scored = []
     for p in candidates:
         penalty = medical_penalty_score(p.title, p.summary)
-        score = 100 - penalty
-        scored.append((score, penalty, p))
+        base_score = 100.0 - float(penalty)
+
+        author_norm, author_debug = (0.0, [])
+        if AUTHOR_SCORE_ENABLED:
+            author_norm, author_debug = get_author_score_for_paper(p)
+
+        final_score = base_score + (AUTHOR_WEIGHT * author_norm)
+
+        print("[DEBUG][SCORE]")
+        print(f"[DEBUG][SCORE] title = {p.title[:80]}")
+        print(f"[DEBUG][SCORE] medical_penalty = {penalty}")
+        print(f"[DEBUG][SCORE] base_score = {base_score}")
+        print(f"[DEBUG][SCORE] author_norm = {author_norm}")
+        print(f"[DEBUG][SCORE] AUTHOR_WEIGHT = {AUTHOR_WEIGHT}")
+        print(f"[DEBUG][SCORE] final_score = {final_score}")
+        if AUTHOR_SCORE_ENABLED and author_debug:
+            top_show = author_debug[:5]
+            for a in top_show:
+                print(f"[DEBUG][AUTHOR] {a.get('name')} hIndex={a.get('hIndex')} citations={a.get('citationCount')} papers={a.get('paperCount')}")
+
+        scored.append((final_score, penalty, author_norm, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    valid_papers = [x[2] for x in scored[:10]]
+    valid_papers = [x[3] for x in scored[:10]]
 
     system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 요약과 3분 대본을 작성해줘."
     system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."

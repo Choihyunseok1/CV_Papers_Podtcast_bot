@@ -19,7 +19,6 @@ GITHUB_REPO = "CV_Papers_Podtcast_bot"
 notion = Client(auth=NOTION_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-
 BATCH_SIZE_FULL = 2
 MAX_OUT_TOKENS_SUMMARY = 4000
 MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
@@ -32,26 +31,7 @@ TTS_CHUNK_CHARS = 2000
 TTS_CHUNK_OVERLAP = 0
 
 
-def should_run_on_arxiv_announce_day():
-    """
-    arXiv announce(배포)는 보통 Eastern Time 기준 20:00에 이루어지고,
-    금/토(Eastern)에는 announce가 없습니다.
-    따라서 실행 시각 기준 Eastern 날짜가 금/토면 라디오 진행(생성)을 하지 않습니다.
-    """
-    et = ZoneInfo("America/New_York")
-    now_et = datetime.datetime.now(et)
-    # weekday(): Mon=0 ... Sun=6
-    # announce 없음: Fri(4), Sat(5)
-    if now_et.weekday() in (4, 5):
-        return False
-    return True
-
-
 def medical_penalty_score(title, abstract):
-    """
-    Medical/Bio만 강하게 감점.
-    title+abstract에서 medical/bio imaging 신호 키워드가 2개 이상이면 -25점.
-    """
     text = f"{title or ''} {abstract or ''}".lower()
 
     keywords = [
@@ -118,7 +98,6 @@ def prompt_summary_and_3min(valid_papers):
 - 각 논문 요약 시작시 '1. (논문제목)' 식으로 앞에 번호만 붙여 진행할 것
 - 논문들 사이는 줄바꿈으로 구분할 것.
 
-
 2. [3분대본]
 - "시간이 없으신 분들을 위한 3분 핵심 요약입니다"로 시작할 것.
 - 모든 논문을 빠짐없이 포함할 것.
@@ -130,14 +109,13 @@ def prompt_summary_and_3min(valid_papers):
 - 논문의 공식 제목은 반드시 영문으로 표기하되, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
 - CNN, ViT, GAN, SOTA 등 약어는 영문 그대로 사용할 것.
 - 전문 기술 용어(diffusion, transformer, attention, self-attention, cross-attention, latent, encoder, decoder, backbone, head, neck, pipeline, architecture, framework, module, block, layer, stage, feature, representation, embedding, token, patch, pixel, resolution, scale, multi-scale, spatial, temporal, semantic, instance, object, bounding box, mask, classification, regression, detection, segmentation, tracking, matching, retrieval, generation, reconstruction, prediction, training, inference, optimization, loss, objective, gradient, backpropagation, scheduler, warmup, regularization, overfitting, underfitting, convergence, likelihood, log-likelihood, prior, posterior, sampling, denoising, noise, variance, distribution, gaussian, entropy, kl-divergence, dataset, benchmark, metric, accuracy, precision, recall, f-score, mean average precision, intersection over union, foundation model, large-scale, multi-modal, vision-language, prompt, prompting, alignment, zero-shot, few-shot, in-context learning, parameter-efficient tuning, point cloud, voxel, mesh, depth, pose, camera, ray, rendering, video, frame, motion, optical flow, reinforcement learning, policy, value function, reward, exploration, exploitation, environment, agent, state, action, episode, timestep, imitation learning, self-supervised learning, supervised learning, unsupervised learning, contrastive learning, pretraining, fine-tuning, transfer learning, curriculum learning, data augmentation, normalization, batch normalization, layer normalization, residual connection, skip connection, attention map, positional encoding, query, key, value, softmax, temperature, logits, probability, score, confidence, threshold, calibration, robustness, generalization, scalability, efficiency, latency, throughput, memory, parameter, hyperparameter, initialization, seed, reproducibility, ablation study, baseline, state-of-the-art, sota, comparison, improvement, gain, trade-off, limitation, future work 등)는 번역하지 말고 반드시 영어 원어 그대로 사용할 것.
-
 - 쉼표(,)를 충분히 사용해 호흡 지점을 표시할 것.
 - 동료 연구자에게 설명하듯 차분한 구어체.
 - 전체 브리핑은 반드시 공적인 라디오 방송 톤의 존댓말로 작성할 것.
 - 반말, 구어체 축약, 친근한 대화체(예: ~해요, ~했죠)는 사용하지 말 것.
 - 연구 비서가 공식적으로 설명하는 말투를 유지할 것.
 
-    [마무리 규칙]
+[마무리 규칙]
 - 모든 논문 설명이 끝난 뒤, 반드시 아래 톤의 아웃트로 멘트를 한 문단으로 추가할 것.
 - 감사 인사나 일상적인 인삿말은 사용하지 말 것.
 - 더 자세한 내용이 전체 브리핑에 있다는 점을 자연스럽게 안내할 것.
@@ -296,41 +274,83 @@ def assemble_radio_script(full_batches_text, total_papers):
     return "\n".join(script_parts).strip()
 
 
+def get_submission_window_et(now_et):
+    wd = now_et.weekday()  # Mon 0 Tue 1 Wed 2 Thu 3 Fri 4 Sat 5 Sun 6
+
+    if wd in (4, 5):
+        return None, None
+
+    today_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def at_14(d):
+        return d.replace(hour=14, minute=0, second=0, microsecond=0)
+
+    if wd == 1:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 2:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 3:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 6:
+        end_et = at_14(today_et - datetime.timedelta(days=2))
+        start_et = end_et - datetime.timedelta(days=1)
+        return start_et, end_et
+
+    if wd == 0:
+        end_et = at_14(today_et)
+        start_et = end_et - datetime.timedelta(days=3)
+        return start_et, end_et
+
+    return None, None
+
+
 def run_bot():
     base_path = os.path.dirname(os.path.abspath(__file__))
     audio_dir = os.path.join(base_path, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
-    # 2) arXiv 업데이트(announce) 날에만 라디오 진행
-    if not should_run_on_arxiv_announce_day():
-        print("arXiv announce가 없는 날(Eastern 기준 금/토)이라 종료합니다.")
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.datetime.now(et)
+
+    window_start_et, window_end_et = get_submission_window_et(now_et)
+    if window_start_et is None:
+        print("오늘은 arXiv announce가 없는 날(ET 기준 금 토)이라 종료합니다.")
         return
 
     seoul_tz = timezone("Asia/Seoul")
     now = datetime.datetime.now(seoul_tz)
-    yesterday_6pm = (now - datetime.timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
 
     search = arxiv.Search(
         query="cat:cs.CV",
-        max_results=10,
+        max_results=200,
         sort_by=arxiv.SortCriterion.SubmittedDate
     )
 
+    arxiv_client = arxiv.Client()
+
     candidates = []
-    for p in search.results():
-        p_date = p.published.astimezone(seoul_tz)
-        if p_date > yesterday_6pm:
+    for p in arxiv_client.results(search):
+        p_submitted_et = p.published.astimezone(et)
+        if window_start_et <= p_submitted_et < window_end_et:
             candidates.append(p)
 
     if not candidates:
-        print("해당 announce window에서 새로 올라온 논문이 없습니다.")
+        print("해당 submission window에서 새로 올라온 논문이 없습니다.")
+        print(f"window(ET): {window_start_et} ~ {window_end_et}")
         return
 
-    # 1) Medical/Bio만 강하게 감점 로직 포함
     scored = []
     for p in candidates:
         penalty = medical_penalty_score(p.title, p.summary)
-        # 기존 동작을 크게 바꾸지 않기 위해, 후보 10개 내에서만 페널티 기반 재정렬 후 Top10 유지
         score = 100 - penalty
         scored.append((score, penalty, p))
 

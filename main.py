@@ -233,6 +233,57 @@ def medical_penalty_score(title, abstract):
     return 25 if hit >= 2 else 0
 
 
+def cv_relevance_penalty_score(title, abstract):
+    """
+    의도:
+    - cs.CV로 검색해도 cross-list 때문에 '실제로는 CV가 아닌' 것들이 섞일 수 있음
+    - 의료 필터처럼 title+abstract 키워드 기반으로, CV 관련성이 약하면 저자 조회 전에 제외
+    규칙(보수적으로):
+    - CV 키워드 히트가 너무 적으면 제외
+    - 비-CV 키워드가 CV 키워드보다 강하면 제외
+    """
+    text = f"{title or ''} {abstract or ''}".lower()
+
+    cv_keywords = [
+        "computer vision", "vision", "image", "images", "video", "visual",
+        "segmentation", "detection", "tracking", "recognition", "classification",
+        "pose", "depth", "stereo", "multi-view", "multiview", "3d", "3-d",
+        "object", "bounding box", "mask", "optical flow", "slam", "reconstruction",
+        "diffusion", "generative", "rendering", "neural rendering",
+        "point cloud", "lidar", "voxel", "bev", "scene", "motion"
+    ]
+
+    non_cv_keywords = [
+        "language model", "llm", "nlp", "text", "prompt", "token", "embedding",
+        "retrieval-augmented", "rag", "qa", "question answering",
+        "time series", "forecasting",
+        "graph", "gnn",
+        "compiler", "database", "operating system", "networking",
+        "cryptography", "security",
+        "theorem", "proof"
+    ]
+
+    cv_hit = 0
+    for k in cv_keywords:
+        if k in text:
+            cv_hit += 1
+
+    non_cv_hit = 0
+    for k in non_cv_keywords:
+        if k in text:
+            non_cv_hit += 1
+
+    # 너무 CV 신호가 약하면 컷 (2 미만이면 제외)
+    if cv_hit < 2:
+        return 25
+
+    # 비CV 신호가 더 강하면 컷
+    if non_cv_hit > cv_hit:
+        return 25
+
+    return 0
+
+
 def split_notion_text(text, max_len=1900):
     text = (text or "").strip()
     if not text:
@@ -457,7 +508,7 @@ def assemble_radio_script(full_batches_text, total_papers):
 
 def get_submission_window_et(now_et):
     wd = now_et.weekday()
-    
+
     if wd in (4, 5):
         return None, None
 
@@ -558,35 +609,48 @@ def run_bot():
 
     scored = []
     for p in candidates:
-        # 1. 의료/바이오 논문은 즉시 제외 (저자 조회 안 함)
-        if medical_penalty_score(p.title, p.summary) > 0:
+        # 1) 의료/바이오 논문은 즉시 제외 (저자 조회 안 함)
+        med_pen = medical_penalty_score(p.title, p.summary)
+        if med_pen > 0:
+            print("[FILTER] medical -> skip")
+            print(f"         title = {p.title[:80]}")
             continue
-    
-        # 2. 저자 점수만 사용 (0~1 정규화 값)
+
+        # 2) CV 관련성 낮으면 즉시 제외 (저자 조회 안 함)
+        cv_pen = cv_relevance_penalty_score(p.title, p.summary)
+        if cv_pen > 0:
+            print("[FILTER] low_cv_relevance -> skip")
+            print(f"         title = {p.title[:80]}")
+            continue
+
+        # 3) 저자 점수만 사용 (0~1 정규화 값)
         author_norm, author_debug = (0.0, [])
         if AUTHOR_SCORE_ENABLED:
             author_norm, author_debug = get_author_score_for_paper(p)
-    
+
         final_score = author_norm
-    
-        # 3. 디버그 로그 (의미 있는 정보만)
+
         print("[SCORE]")
-        print(f"[{p.title[:]}]")
+        print(f"title = {p.title[:80]}")
         print(f"author_score = {final_score:.4f}")
-    
+
         if AUTHOR_SCORE_ENABLED and author_debug:
-            for a in author_debug[:2]:  # 1,2저자만 출력
+            for a in author_debug[:2]:
                 print(
                     f"    {a.get('name')} "
-                    f"    hIndex={a.get('hIndex')} "
-                    f"    citations={a.get('citationCount')} "
-                    f"    papers={a.get('paperCount')}"
+                    f"hIndex={a.get('hIndex')} "
+                    f"citations={a.get('citationCount')} "
+                    f"papers={a.get('paperCount')}"
                 )
-    
+
         scored.append((final_score, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     valid_papers = [x[1] for x in scored[:10]]
+
+    if not valid_papers:
+        print("필터(의료/비CV) 이후 남은 논문이 없습니다.")
+        return
 
     system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 요약과 3분 대본을 작성해줘."
     system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."

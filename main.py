@@ -7,6 +7,7 @@ from pytz import timezone
 from pydub import AudioSegment
 import io
 import re
+import json
 from zoneinfo import ZoneInfo
 import time
 import requests
@@ -421,6 +422,166 @@ def call_gpt_text(system_text, user_text, max_tokens):
     return (resp.choices[0].message.content or "").strip()
 
 
+def call_gpt_json(system_text, user_text, max_tokens=2000, retries=2, sleep_sec=0.8):
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp_text = call_gpt_text(system_text, user_text, max_tokens=max_tokens)
+            cleaned = (resp_text or "").strip()
+
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+
+            if "{" in cleaned and "}" in cleaned:
+                cleaned = cleaned[cleaned.find("{"): cleaned.rfind("}") + 1]
+
+            return json.loads(cleaned)
+        except Exception as e:
+            last_err = e
+            print(f"[LLM_JSON] parse_failed attempt={attempt} err={e}")
+            if attempt < retries:
+                time.sleep(sleep_sec)
+
+    print(f"[LLM_JSON] giving_up err={last_err}")
+    return {}
+
+
+def get_arxiv_id_from_pdf_url(pdf_url: str) -> str:
+    if not pdf_url:
+        return ""
+    m = re.search(r"/pdf/([0-9]+\.[0-9]+v[0-9]+)", pdf_url)
+    if m:
+        return m.group(1)
+    m = re.search(r"/pdf/([0-9]+\.[0-9]+)", pdf_url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def build_today_trend_themes_via_llm(papers, max_titles=160, n_themes=10):
+    titles = []
+    for p in papers[:max_titles]:
+        t = (getattr(p, "title", "") or "").strip()
+        if t:
+            titles.append(t)
+
+    titles_block = "\n".join([f"- {t}" for t in titles])
+
+    system_text = "너는 컴퓨터 비전(cs.CV) 연구 트렌드를 요약하는 분석가다. 반드시 JSON만 출력한다."
+    user_text = f"""
+아래는 오늘 arXiv cs.CV에 올라온 논문 제목 목록이다(의료 논문은 이미 제외됨).
+이 목록만 보고, '오늘의 CV 트렌드 테마'를 {n_themes}개 뽑아라.
+
+출력은 반드시 아래 JSON 형식을 만족해야 한다. 다른 텍스트 금지.
+
+{{
+  "themes": [
+    {{
+      "name": "짧은 테마명",
+      "keywords": ["키워드/구문1","키워드/구문2","키워드/구문3"],
+      "one_line": "왜 오늘 트렌드인지 1줄 설명"
+    }}
+  ]
+}}
+
+규칙:
+- themes 길이는 정확히 {n_themes}
+- keywords는 각 테마당 3~6개
+- 너무 일반적인 단어(예: model, method, learning)는 피함
+- 키워드는 제목에 실제로 등장하거나 강하게 연상되는 구문 위주
+
+제목 목록:
+{titles_block}
+""".strip()
+
+    data = call_gpt_json(system_text, user_text, max_tokens=2000)
+    themes = data.get("themes", []) if isinstance(data, dict) else []
+    if not isinstance(themes, list):
+        themes = []
+
+    clean = []
+    for th in themes:
+        if not isinstance(th, dict):
+            continue
+        name = (th.get("name") or "").strip()
+        kws = th.get("keywords") or []
+        one_line = (th.get("one_line") or "").strip()
+        if name and isinstance(kws, list):
+            kws = [str(x).strip() for x in kws if str(x).strip()]
+            if 3 <= len(kws) <= 6:
+                clean.append({"name": name, "keywords": kws, "one_line": one_line})
+
+    return clean
+
+
+def compute_trend_match_score(title: str, abstract: str, themes) -> float:
+    text = f"{title}\n{abstract}".lower()
+    score = 0.0
+    for th in themes:
+        for kw in th.get("keywords", []):
+            k = str(kw).strip().lower()
+            if k and k in text:
+                score += 1.0
+    return score
+
+
+def select_topk_by_trend(papers, themes, topk=50, min_keep=30):
+    scored_local = []
+    for p in papers:
+        s = compute_trend_match_score(getattr(p, "title", "") or "", getattr(p, "summary", "") or "", themes)
+        scored_local.append((s, p))
+
+    scored_local.sort(key=lambda x: x[0], reverse=True)
+
+    selected = [p for (s, p) in scored_local[:topk]]
+    if len(selected) < min_keep:
+        selected = [p for (_, p) in scored_local[:min_keep]]
+
+    return selected, scored_local[:topk]
+
+
+def pick_top10_via_llm(candidates_topk, n_pick=10):
+    items = []
+    for p in candidates_topk:
+        pid = get_arxiv_id_from_pdf_url(getattr(p, "pdf_url", "") or "")
+        title = (getattr(p, "title", "") or "").strip()
+        abstract = (getattr(p, "summary", "") or "").strip()[:900]
+        items.append({"arxiv_id": pid, "title": title, "abstract": abstract})
+
+    system_text = "너는 IRCV 랩실의 수석 연구 비서다. 반드시 JSON만 출력한다."
+    user_text = f"""
+아래 후보 논문 목록에서 '오늘 업데이트된 cs.CV 논문 중 주요 논문 Top{n_pick}'을 선정해라.
+출력은 제목만 뽑되, 내부 디버깅을 위해 1줄 이유도 함께 넣어라.
+
+반드시 아래 JSON 형식만 출력:
+{{
+  "top10": [
+    {{
+      "arxiv_id": "2602.03414v1",
+      "title": "논문 제목",
+      "reason": "1줄 이유"
+    }}
+  ],
+  "criteria": ["기준1","기준2","기준3","기준4"]
+}}
+
+규칙:
+- top10 길이는 정확히 {n_pick}
+- arxiv_id는 후보에 있는 것만 사용
+- title은 후보 title을 그대로 사용
+- 다른 텍스트 금지
+
+후보 목록(JSON):
+{json.dumps(items, ensure_ascii=False)}
+""".strip()
+
+    data = call_gpt_json(system_text, user_text, max_tokens=2200)
+    top10 = data.get("top10", []) if isinstance(data, dict) else []
+    if not isinstance(top10, list):
+        top10 = []
+    return data, top10
+
+
 def synthesize_tts_to_audio(text, tts_chunk_chars=2000, overlap=0):
     chunks = chunk_text_by_chars(text, chunk_chars=tts_chunk_chars, overlap=overlap)
     combined = AudioSegment.empty()
@@ -608,6 +769,7 @@ def run_bot():
         return
 
     scored = []
+    filtered_candidates = []
     for p in candidates:
         # 1) 의료/바이오 논문은 즉시 제외 (저자 조회 안 함)
         med_pen = medical_penalty_score(p.title, p.summary)
@@ -623,30 +785,55 @@ def run_bot():
             print(f"         title = {p.title[:80]}")
             continue
 
-        # 3) 저자 점수만 사용 (0~1 정규화 값)
-        author_norm, author_debug = (0.0, [])
-        if AUTHOR_SCORE_ENABLED:
-            author_norm, author_debug = get_author_score_for_paper(p)
+        filtered_candidates.append(p)
 
-        final_score = author_norm
+    print(f"[CANDIDATES] after_filters = {len(filtered_candidates)}")
 
-        print("[SCORE]")
-        print(f"title = {p.title[:80]}")
-        print(f"author_score = {final_score:.4f}")
+    if not filtered_candidates:
+        valid_papers = []
+    else:
+        themes = build_today_trend_themes_via_llm(filtered_candidates, max_titles=160, n_themes=10)
 
-        if AUTHOR_SCORE_ENABLED and author_debug:
-            for a in author_debug[:2]:
-                print(
-                    f"    {a.get('name')} "
-                    f"hIndex={a.get('hIndex')} "
-                    f"citations={a.get('citationCount')} "
-                    f"papers={a.get('paperCount')}"
-                )
+        print("[TREND_THEMES]")
+        for i, th in enumerate(themes[:10], start=1):
+            print(f"  {i}. {th.get('name')}")
+            kws = th.get("keywords", [])
+            if kws:
+                print(f"     keywords: {', '.join(kws)}")
 
-        scored.append((final_score, p))
+        topk_candidates, topk_debug = select_topk_by_trend(filtered_candidates, themes, topk=50, min_keep=30)
+        print(f"[TOPK] selected_for_llm = {len(topk_candidates)}")
+        for s, pp in topk_debug[:10]:
+            print(f"  score={s:.1f} title={pp.title[:80]}")
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    valid_papers = [x[1] for x in scored[:10]]
+        top10_data, top10_list = pick_top10_via_llm(topk_candidates, n_pick=10)
+
+        id_to_paper = {}
+        for pp in topk_candidates:
+            pid = get_arxiv_id_from_pdf_url(getattr(pp, "pdf_url", "") or "")
+            if pid:
+                id_to_paper[pid] = pp
+
+        chosen = []
+        seen = set()
+        for item in top10_list:
+            pid = str(item.get("arxiv_id", "")).strip()
+            if pid and pid in id_to_paper and pid not in seen:
+                chosen.append(id_to_paper[pid])
+                seen.add(pid)
+
+        if len(chosen) < 10:
+            for pp in topk_candidates:
+                pid = get_arxiv_id_from_pdf_url(getattr(pp, "pdf_url", "") or "")
+                key = pid or pp.title
+                if key in seen:
+                    continue
+                chosen.append(pp)
+                seen.add(key)
+                if len(chosen) >= 10:
+                    break
+
+        valid_papers = chosen[:10]
 
     if not valid_papers:
         print("필터(의료/비CV) 이후 남은 논문이 없습니다.")

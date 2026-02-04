@@ -153,6 +153,7 @@ def get_author_score_for_paper(arxiv_paper):
         return 0.0, []
 
     authors = getattr(arxiv_paper, "authors", None) or []
+    authors = authors[:2]   # 1저자 + 2저자만 사용
     if not authors:
         return 0.0, []
 

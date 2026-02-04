@@ -537,7 +537,7 @@ def run_bot():
         total_scanned += 1
         p_submitted_et = p.published.astimezone(et)
 
-        print(f"[SCAN] {p.title[:120]}")
+        print(f"[SCAN] [{p.title[:120]}]")
         print(f"       submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:
@@ -586,7 +586,7 @@ def run_bot():
         scored.append((final_score, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    valid_papers = [x[3] for x in scored[:10]]
+    valid_papers = [x[1] for x in scored[:10]]
 
     system_summary = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 요약과 3분 대본을 작성해줘."
     system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."

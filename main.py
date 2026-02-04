@@ -533,7 +533,7 @@ def run_bot():
         total_scanned += 1
         p_submitted_et = p.published.astimezone(et)
 
-        print(f"[SCAN] {p.title[:60]}")
+        print(f"[SCAN] {p.title[:120]}")
         print(f"submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:

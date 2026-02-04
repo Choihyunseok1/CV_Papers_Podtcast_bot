@@ -534,13 +534,13 @@ def run_bot():
         p_submitted_et = p.published.astimezone(et)
 
         print(f"[SCAN] {p.title[:120]}")
-        print(f"submitted_et = {p_submitted_et}")
+        print(f"       submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:
-            print("-> IN WINDOW")
+            print("    -> IN WINDOW")
             candidates.append(p)
         else:
-            print("-> OUT OF WINDOW")
+            print("    -> OUT OF WINDOW")
 
     print(f"Total scanned papers = {total_scanned}")
     print(f"Papers in submission window = {len(candidates)}")
@@ -573,10 +573,10 @@ def run_bot():
         if AUTHOR_SCORE_ENABLED and author_debug:
             for a in author_debug[:2]:  # 1,2저자만 출력
                 print(
-                    f"{a.get('name')} "
-                    f"hIndex={a.get('hIndex')} "
-                    f"citations={a.get('citationCount')} "
-                    f"papers={a.get('paperCount')}"
+                    f"    {a.get('name')} "
+                    f"    hIndex={a.get('hIndex')} "
+                    f"    citations={a.get('citationCount')} "
+                    f"    papers={a.get('paperCount')}"
                 )
     
         scored.append((final_score, p))

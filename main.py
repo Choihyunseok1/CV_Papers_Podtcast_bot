@@ -541,10 +541,10 @@ def run_bot():
         print(f"       submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:
-            print("    -> IN WINDOW")
+            print("       -> IN WINDOW")
             candidates.append(p)
         else:
-            print("    -> OUT OF WINDOW")
+            print("       -> OUT OF WINDOW")
 
     print(f"Total scanned papers = {total_scanned}")
     print(f"Papers in submission window = {len(candidates)}")
@@ -571,7 +571,7 @@ def run_bot():
     
         # 3. 디버그 로그 (의미 있는 정보만)
         print("[SCORE]")
-        print(f"[title = {p.title[:80]}")
+        print(f"[{p.title[:120]}]")
         print(f"author_score = {final_score:.4f}")
     
         if AUTHOR_SCORE_ENABLED and author_debug:

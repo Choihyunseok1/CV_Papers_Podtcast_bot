@@ -534,13 +534,13 @@ def run_bot():
         p_submitted_et = p.published.astimezone(et)
 
         print(f"[SCAN] {p.title[:60]}")
-        print(f"[SCAN] submitted_et = {p_submitted_et}")
+        print(f"submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:
-            print("[SCAN] -> IN WINDOW")
+            print("-> IN WINDOW")
             candidates.append(p)
         else:
-            print("[SCAN] -> OUT OF WINDOW")
+            print("-> OUT OF WINDOW")
 
     print(f"Total scanned papers = {total_scanned}")
     print(f"Papers in submission window = {len(candidates)}")
@@ -567,13 +567,13 @@ def run_bot():
     
         # 3. 디버그 로그 (의미 있는 정보만)
         print("[SCORE]")
-        print(f"[SCORE] title        = {p.title[:80]}")
-        print(f"[SCORE] author_score = {final_score:.4f}")
+        print(f"[title = {p.title[:80]}")
+        print(f"author_score = {final_score:.4f}")
     
         if AUTHOR_SCORE_ENABLED and author_debug:
             for a in author_debug[:2]:  # 1,2저자만 출력
                 print(
-                    f"[AUTHOR] {a.get('name')} "
+                    f"{a.get('name')} "
                     f"hIndex={a.get('hIndex')} "
                     f"citations={a.get('citationCount')} "
                     f"papers={a.get('paperCount')}"

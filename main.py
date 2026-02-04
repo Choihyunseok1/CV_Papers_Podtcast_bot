@@ -7,6 +7,7 @@ from pytz import timezone
 from pydub import AudioSegment
 import io
 import re
+import json
 from zoneinfo import ZoneInfo
 import time
 import requests
@@ -23,390 +24,228 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 BATCH_SIZE_FULL = 2
 MAX_OUT_TOKENS_SUMMARY = 4000
-MAX_OUT_TOKENS_FULL_PER_BATCH = 2800
+MAX_OUT_TOKENS_FULL_PER_PAPER = 4000
 
-TTS_MODEL = "tts-1-hd"
-TTS_VOICE = "onyx"
-TTS_SPEED = 1.25
-
-TTS_CHUNK_CHARS = 2000
-TTS_CHUNK_OVERLAP = 0
+TOP_PAPERS_LIMIT = 10
+MAX_RESULTS = 200
 
 AUTHOR_SCORE_ENABLED = True
+AUTHOR_SCORE_LIMIT = 2
+AUTHOR_SCORE_HINDEX_CAP = 80
 
-SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
-SEMANTIC_SCHOLAR_BASE_URL = "https://api.semanticscholar.org/graph/v1"
+TTS_MODEL = "gpt-4o-mini-tts"
+TTS_VOICE = "alloy"
 
-AUTHOR_WEIGHT = 10.0
-AUTHOR_HINDEX_CAP = 80.0
-AUTHOR_MIN_REQUEST_INTERVAL_SEC = 0.15
-AUTHOR_HTTP_TIMEOUT_SEC = 10
-AUTHOR_HTTP_RETRIES = 3
-AUTHOR_HTTP_BACKOFF_SEC = 0.6
+WINDOW_DAYS = 1
 
-AUTHOR_AGG_METHOD = "max"
-AUTHOR_SCORE_SOURCE = "hindex"
+ET = timezone("US/Eastern")
 
+NON_CV_KEYWORDS = [
+    "medical",
+    "medicine",
+    "clinical",
+    "patient",
+    "radiology",
+    "pathology",
+    "ct",
+    "mri",
+    "ultrasound",
+    "ecg",
+    "eeg",
+    "diagnosis",
+    "diagnostic",
+    "disease",
+    "tumor",
+    "cancer",
+    "biomedical",
+    "bioinformatics",
+    "genomics",
+    "protein",
+    "cell",
+    "molecular",
+    "drug",
+    "pharma",
+    "surgery",
+]
 
-_author_cache_by_name = {}
-_author_last_request_time = 0.0
-
-
-def _semantic_scholar_headers():
-    headers = {
-        "Accept": "application/json"
-    }
-    if SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
-    return headers
-
-
-def _rate_limit_sleep():
-    global _author_last_request_time
-    now = time.time()
-    elapsed = now - _author_last_request_time
-    if elapsed < AUTHOR_MIN_REQUEST_INTERVAL_SEC:
-        time.sleep(AUTHOR_MIN_REQUEST_INTERVAL_SEC - elapsed)
-    _author_last_request_time = time.time()
-
-
-def _http_get_json(url, params=None, timeout_sec=10, retries=3):
-    last_err = None
-    for attempt in range(1, retries + 1):
-        try:
-            _rate_limit_sleep()
-            r = requests.get(
-                url,
-                params=params,
-                headers=_semantic_scholar_headers(),
-                timeout=timeout_sec
-            )
-            if r.status_code == 200:
-                return r.json()
-            last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            last_err = e
-
-        time.sleep(AUTHOR_HTTP_BACKOFF_SEC * attempt)
-
-    raise last_err
-
-
-def _ss_find_author_id_by_name(author_name):
-    author_name = (author_name or "").strip()
-    if not author_name:
-        return None
-
-    cache = _author_cache_by_name.get(author_name)
-    if cache and "authorId" in cache:
-        return cache["authorId"]
-
-    url = f"{SEMANTIC_SCHOLAR_BASE_URL}/author/search"
-    params = {
-        "query": author_name,
-        "limit": 1,
-        "fields": "authorId,name"
-    }
-    data = _http_get_json(
-        url,
-        params=params,
-        timeout_sec=AUTHOR_HTTP_TIMEOUT_SEC,
-        retries=AUTHOR_HTTP_RETRIES
-    )
-    items = data.get("data", []) if isinstance(data, dict) else []
-    if not items:
-        _author_cache_by_name[author_name] = {"authorId": None}
-        return None
-
-    author_id = items[0].get("authorId")
-    _author_cache_by_name[author_name] = {"authorId": author_id}
-    return author_id
+CV_KEYWORDS = [
+    "computer vision",
+    "vision",
+    "image",
+    "video",
+    "segmentation",
+    "detection",
+    "recognition",
+    "tracking",
+    "3d",
+    "depth",
+    "stereo",
+    "pose",
+    "slam",
+    "reconstruction",
+    "gaussian splatting",
+    "diffusion",
+    "generative",
+    "multimodal",
+    "vqa",
+    "caption",
+    "vlm",
+    "transformer",
+    "self-supervised",
+    "representation learning",
+]
 
 
-def _ss_get_author_metrics(author_id):
-    if not author_id:
-        return None
-
-    url = f"{SEMANTIC_SCHOLAR_BASE_URL}/author/{author_id}"
-    params = {
-        "fields": "name,hIndex,citationCount,paperCount"
-    }
-    data = _http_get_json(
-        url,
-        params=params,
-        timeout_sec=AUTHOR_HTTP_TIMEOUT_SEC,
-        retries=AUTHOR_HTTP_RETRIES
-    )
-    if not isinstance(data, dict):
-        return None
-
-    return {
-        "name": data.get("name"),
-        "hIndex": float(data.get("hIndex") or 0.0),
-        "citationCount": float(data.get("citationCount") or 0.0),
-        "paperCount": float(data.get("paperCount") or 0.0),
-    }
+def normalize_text(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
 
-def get_author_score_for_paper(arxiv_paper):
-    if not AUTHOR_SCORE_ENABLED:
-        return 0.0, []
+def is_today_published_in_et(published_dt_utc, window_start_et, window_end_et):
+    if published_dt_utc is None:
+        return False
+    published_et = published_dt_utc.astimezone(ET)
+    return (window_start_et <= published_et < window_end_et)
 
-    authors = getattr(arxiv_paper, "authors", None) or []
-    authors = authors[:2]   # 1저자 + 2저자만 사용
-    if not authors:
-        return 0.0, []
 
-    author_scores = []
-    author_debug = []
-
-    for a in authors:
-        name = str(a).strip()
-        if not name:
-            continue
-
-        if name in _author_cache_by_name and "metrics" in _author_cache_by_name[name]:
-            metrics = _author_cache_by_name[name]["metrics"]
-        else:
-            try:
-                author_id = _ss_find_author_id_by_name(name)
-                metrics = _ss_get_author_metrics(author_id) if author_id else None
-            except Exception:
-                metrics = None
-
-            if name not in _author_cache_by_name:
-                _author_cache_by_name[name] = {}
-            _author_cache_by_name[name]["metrics"] = metrics
-
-        if not metrics:
-            author_debug.append({"name": name, "hIndex": 0.0, "citationCount": 0.0, "paperCount": 0.0})
-            author_scores.append(0.0)
-            continue
-
-        hidx = float(metrics.get("hIndex") or 0.0)
-        ctc = float(metrics.get("citationCount") or 0.0)
-        pc = float(metrics.get("paperCount") or 0.0)
-
-        if AUTHOR_SCORE_SOURCE == "hindex":
-            raw = hidx
-        elif AUTHOR_SCORE_SOURCE == "citations":
-            raw = ctc
-        elif AUTHOR_SCORE_SOURCE == "papers":
-            raw = pc
-        else:
-            raw = hidx
-
-        author_debug.append({"name": name, "hIndex": hidx, "citationCount": ctc, "paperCount": pc})
-        author_scores.append(raw)
-
-    if not author_scores:
-        return 0.0, author_debug
-
-    if AUTHOR_AGG_METHOD == "mean":
-        agg = sum(author_scores) / max(1, len(author_scores))
-    else:
-        agg = max(author_scores)
-
-    norm = min(max(agg, 0.0), AUTHOR_HINDEX_CAP) / max(1.0, AUTHOR_HINDEX_CAP)
-
-    return float(norm), author_debug
+def contains_any_keyword(text, keywords):
+    t = (text or "").lower()
+    for kw in keywords:
+        if kw.lower() in t:
+            return True
+    return False
 
 
 def medical_penalty_score(title, abstract):
-    text = f"{title or ''} {abstract or ''}".lower()
-
-    keywords = [
-        "medical", "clinical", "patient", "disease",
-        "cancer", "tumor", "lesion",
-        "pathology", "histopathology", "radiology",
-        "ct", "mri", "pet", "ultrasound",
-        "organ", "tissue", "cell",
-        "diagnosis", "screening", "prognosis",
-        "pancreatic", "lung cancer", "breast cancer"
-    ]
-
-    hit = 0
-    for k in keywords:
-        if k in text:
-            hit += 1
-
-    return 25 if hit >= 2 else 0
-
-
-def cv_relevance_penalty_score(title, abstract):
-    """
-    의도:
-    - cs.CV로 검색해도 cross-list 때문에 '실제로는 CV가 아닌' 것들이 섞일 수 있음
-    - 의료 필터처럼 title+abstract 키워드 기반으로, CV 관련성이 약하면 저자 조회 전에 제외
-    규칙(보수적으로):
-    - CV 키워드 히트가 너무 적으면 제외
-    - 비-CV 키워드가 CV 키워드보다 강하면 제외
-    """
-    text = f"{title or ''} {abstract or ''}".lower()
-
-    cv_keywords = [
-        "computer vision", "vision", "image", "images", "video", "visual",
-        "segmentation", "detection", "tracking", "recognition", "classification",
-        "pose", "depth", "stereo", "multi-view", "multiview", "3d", "3-d",
-        "object", "bounding box", "mask", "optical flow", "slam", "reconstruction",
-        "diffusion", "generative", "rendering", "neural rendering",
-        "point cloud", "lidar", "voxel", "bev", "scene", "motion"
-    ]
-
-    non_cv_keywords = [
-        "language model", "llm", "nlp", "text", "prompt", "token", "embedding",
-        "retrieval-augmented", "rag", "qa", "question answering",
-        "time series", "forecasting",
-        "graph", "gnn",
-        "compiler", "database", "operating system", "networking",
-        "cryptography", "security",
-        "theorem", "proof"
-    ]
-
-    cv_hit = 0
-    for k in cv_keywords:
-        if k in text:
-            cv_hit += 1
-
-    non_cv_hit = 0
-    for k in non_cv_keywords:
-        if k in text:
-            non_cv_hit += 1
-
-    # 너무 CV 신호가 약하면 컷 (2 미만이면 제외)
-    if cv_hit < 2:
-        return 25
-
-    # 비CV 신호가 더 강하면 컷
-    if non_cv_hit > cv_hit:
-        return 25
-
+    text = f"{title}\n{abstract}".lower()
+    for kw in NON_CV_KEYWORDS:
+        if kw in text:
+            return 1
     return 0
 
 
-def split_notion_text(text, max_len=1900):
-    text = (text or "").strip()
-    if not text:
-        return []
-    return [text[i:i + max_len] for i in range(0, len(text), max_len)]
+def cv_relevance_penalty_score(title, abstract):
+    text = f"{title}\n{abstract}".lower()
+    cv_hit = 0
+    for kw in CV_KEYWORDS:
+        if kw in text:
+            cv_hit += 1
+
+    if cv_hit < 2:
+        return 1
+    return 0
 
 
-def chunk_text_by_chars(text, chunk_chars=2000, overlap=0):
-    text = (text or "").strip()
-    if not text:
-        return []
-    chunks = []
-    i = 0
-    n = len(text)
-    step = max(1, chunk_chars - overlap)
-    while i < n:
-        chunk = text[i:i + chunk_chars].strip()
-        if chunk:
-            chunks.append(chunk)
-        i += step
-    return chunks
+def get_semantic_scholar_author(name: str):
+    q = normalize_text(name)
+    if not q:
+        return None
+
+    url = "https://api.semanticscholar.org/graph/v1/author/search"
+    params = {"query": q, "limit": 1, "fields": "name,hIndex,citationCount,paperCount"}
+
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("data"):
+            return None
+        return data["data"][0]
+    except Exception:
+        return None
 
 
-def build_papers_info(papers):
+def normalize_hindex(hindex: int, cap: int = AUTHOR_SCORE_HINDEX_CAP):
+    if hindex is None:
+        return 0.0
+    try:
+        h = float(hindex)
+    except Exception:
+        return 0.0
+    if h < 0:
+        h = 0.0
+    if h > cap:
+        h = cap
+    return h / float(cap)
+
+
+def get_author_score_for_paper(paper):
+    authors = paper.authors or []
+    debug = []
+    scores = []
+
+    for a in authors[:AUTHOR_SCORE_LIMIT]:
+        name = getattr(a, "name", None) or str(a)
+        info = get_semantic_scholar_author(name)
+        if info:
+            h = info.get("hIndex")
+            scores.append(normalize_hindex(h))
+            debug.append(info)
+        else:
+            scores.append(0.0)
+            debug.append({"name": name, "hIndex": None, "citationCount": None, "paperCount": None})
+
+    if not scores:
+        return 0.0, debug
+
+    return max(scores), debug
+
+
+def build_papers_info(valid_papers):
     papers_info = ""
-    for i, p in enumerate(papers):
-        papers_info += f"논문 {i+1} 제목: {p.title}\n초록: {p.summary}\n\n"
+    for i, p in enumerate(valid_papers):
+        papers_info += f"\n[{i+1}] {p.title}\n"
+        papers_info += f"Abstract: {p.summary}\n"
+        papers_info += f"PDF: {p.pdf_url}\n"
     return papers_info
 
 
 def prompt_summary_and_3min(valid_papers):
     papers_info = build_papers_info(valid_papers)
-    return f"""
-아래는 어제 저녁부터 오늘 새벽 사이에 새로 발표된 {len(valid_papers)}개의 컴퓨터 비전 논문입니다.
 
+    user_text = f"""
+아래는 오늘 arXiv cs.CV에 업데이트된 주요 논문 10개 정보다.
+요구사항:
+- 1) 전체 흐름/오늘의 기술 트렌드를 7~10줄로 요약해라(한국어).
+- 2) 이어서 라디오 진행자가 말할 수 있는 3분 분량 스크립트를 작성해라(한국어).
+- 3) 각 논문은 1~2문장씩만 짚고, 연결 흐름이 자연스럽게.
+- 4) 너무 논문 나열하지 말고, 큰 흐름을 강조해라.
+
+논문 목록:
 {papers_info}
-
-위 논문들을 바탕으로 다음 두 가지를 작성해 주세요.
-
-1. [요약]
-- 노션 기록용 핵심 요약.
-- 각 논문별로 제목을 언급하고, '-함', '-임' 형태의 짧은 요약체로 3줄씩 작성할 것
-- 한 줄이 끝나면 반드시 엔터로 구분해서 보기 편하게 만들 것
-- 각 논문 요약 시작시 '1. (논문제목)' 식으로 앞에 번호만 붙여 진행할 것
-- 논문들 사이는 줄바꿈으로 구분할 것.
-
-2. [3분대본]
-- "시간이 없으신 분들을 위한 3분 핵심 요약입니다"로 시작할 것.
-- 모든 논문을 빠짐없이 포함할 것.
-- 각 논문 제목을 말한 뒤 , 논문 당 약 400자 내외로 설명할 것.
-- 전체 길이는 약 3분(±15초) 분량이 되도록 조절할 것.
-- 논문 수가 많을 경우, 각 논문의 설명 길이를 자동으로 줄여서 전체 분량을 유지할 것.
-- 분량이 부족하더라도 일부 논문을 생략하지 말 것.
-- 모든 논문을 최소한 한 단락 이상 설명할 것.
-- 논문의 공식 제목은 반드시 영문으로 표기하되, 제목의 특수 기호(:, -, +, / 등)는 쉼표(,)로 바꿀 것.
-- CNN, ViT, GAN, SOTA 등 약어는 영문 그대로 사용할 것.
-- 전문 기술 용어(diffusion, transformer, attention, self-attention, cross-attention, latent, encoder, decoder, backbone, head, neck, pipeline, architecture, framework, module, block, layer, stage, feature, representation, embedding, token, patch, pixel, resolution, scale, multi-scale, spatial, temporal, semantic, instance, object, bounding box, mask, classification, regression, detection, segmentation, tracking, matching, retrieval, generation, reconstruction, prediction, training, inference, optimization, loss, objective, gradient, backpropagation, scheduler, warmup, regularization, overfitting, underfitting, convergence, likelihood, log-likelihood, prior, posterior, sampling, denoising, noise, variance, distribution, gaussian, entropy, kl-divergence, dataset, benchmark, metric, accuracy, precision, recall, f-score, mean average precision, intersection over union, foundation model, large-scale, multi-modal, vision-language, prompt, prompting, alignment, zero-shot, few-shot, in-context learning, parameter-efficient tuning, point cloud, voxel, mesh, depth, pose, camera, ray, rendering, video, frame, motion, optical flow, reinforcement learning, policy, value function, reward, exploration, exploitation, environment, agent, state, action, episode, timestep, imitation learning, self-supervised learning, supervised learning, unsupervised learning, contrastive learning, pretraining, fine-tuning, transfer learning, curriculum learning, data augmentation, normalization, batch normalization, layer normalization, residual connection, skip connection, attention map, positional encoding, query, key, value, softmax, temperature, logits, probability, score, confidence, threshold, calibration, robustness, generalization, scalability, efficiency, latency, throughput, memory, parameter, hyperparameter, initialization, seed, reproducibility, ablation study, baseline, state-of-the-art, sota, comparison, improvement, gain, trade-off, limitation, future work 등)는 번역하지 말고 반드시 영어 원어 그대로 사용할 것.
-- 쉼표(,)를 충분히 사용해 호흡 지점을 표시할 것.
-- 동료 연구자에게 설명하듯 차분한 구어체.
-- 전체 브리핑은 반드시 공적인 라디오 방송 톤의 존댓말로 작성할 것.
-- 반말, 구어체 축약, 친근한 대화체(예: ~해요, ~했죠)는 사용하지 말 것.
-- 연구 비서가 공식적으로 설명하는 말투를 유지할 것.
-
-[마무리 규칙]
-- 모든 논문 설명이 끝난 뒤, 반드시 아래 톤의 아웃트로 멘트를 한 문단으로 추가할 것.
-- 감사 인사나 일상적인 인삿말은 사용하지 말 것.
-- 더 자세한 내용이 전체 브리핑에 있다는 점을 자연스럽게 안내할 것.
-
-아웃트로 예시 톤:
-"보다 자세한 내용은 전체 브리핑에서 이어서 다룹니다.
-지금까지 오늘의 컴퓨터 비전 논문 3분 핵심 요약이었습니다."
-
-출력 형식:
-[요약]
-(내용)
-
-[3분대본]
-(내용)
 """.strip()
+    return user_text
 
 
-def prompt_full_body_for_batch(batch_papers, batch_index, total_batches, start_index):
-    papers_info = build_papers_info(batch_papers)
+def prompt_full_script_for_each_paper(paper):
+    user_text = f"""
+아래 논문 하나에 대해서, 라디오 진행자가 읽을 수 있는 "논문 본문 스크립트"만 작성해줘.
+요구사항:
+- 한국어
+- 너무 길지 않게(1~2분 분량)
+- 핵심 아이디어, 방법, 장점, 한계, 앞으로의 방향을 포함
 
-    return f"""
-아래는 컴퓨터 비전 논문 배치 {batch_index}/{total_batches}입니다.
-이 배치의 논문 전역 번호는 {start_index}부터 시작합니다.
-
-{papers_info}
-
-중요:
-- 지금은 방송의 도입부와 맺음말을 쓰지 않습니다.
-- "첫 번째 논문", "이번 배치", "안녕하세요", "오늘은" 같은 진행 멘트와 순서 멘트를 절대 쓰지 마세요.
-- 오직 각 논문 설명 본문만 출력하세요.
-
-분량:
-- 논문 1편당 약 2200자 내외로 상세히 설명하세요.
-
-구조 (내부 참고용):
-A. 문제의식과 배경
-B. 핵심 아이디어 한 줄 요약과 의미
-C. 방법을 단계적으로 설명
-D. 실험과 결과의 경향
-E. 한계와 추후 과제
-F. 실전 감상 포인트 2개
-
-언어 규칙:
-- 쉼표(,)로 호흡, 마침표(.)로 강조.
-- CNN, ViT, GAN, SOTA 등 약어는 영문 그대로 사용할 것.
-- 동료 연구자에게 설명하듯 차분한 구어체.
-- 오디오 스크립트에서는 절대 "A.", "B.", "첫째", "다음으로", "이어서" 등 구조나 순서를 직접적으로 언급하지 마세요.
-- 전체 브리핑은 반드시 공적인 라디오 방송 톤의 존댓말로 작성할 것.
-- 반말, 구어체 축약, 친근한 대화체(예: ~해요, ~했죠)는 사용하지 말 것.
-- 연구 비서가 공식적으로 설명하는 말투를 유지할 것.
-- 전문 기술 용어(diffusion, transformer, attention, self-attention, cross-attention, latent, encoder, decoder, backbone, head, neck, pipeline, architecture, framework, module, block, layer, stage, feature, representation, embedding, token, patch, pixel, resolution, scale, multi-scale, spatial, temporal, semantic, instance, object, bounding box, mask, classification, regression, detection, segmentation, tracking, matching, retrieval, generation, reconstruction, prediction, training, inference, optimization, loss, objective, gradient, backpropagation, scheduler, warmup, regularization, overfitting, underfitting, convergence, likelihood, log-likelihood, prior, posterior, sampling, denoising, noise, variance, distribution, gaussian, entropy, kl-divergence, dataset, benchmark, metric, accuracy, precision, recall, f-score, mean average precision, intersection over union, foundation model, large-scale, multi-modal, vision-language, prompt, prompting, alignment, zero-shot, few-shot, in-context learning, parameter-efficient tuning, point cloud, voxel, mesh, depth, pose, camera, ray, rendering, video, frame, motion, optical flow, reinforcement learning, policy, value function, reward, exploration, exploitation, environment, agent, state, action, episode, timestep, imitation learning, self-supervised learning, supervised learning, unsupervised learning, contrastive learning, pretraining, fine-tuning, transfer learning, curriculum learning, data augmentation, normalization, batch normalization, layer normalization, residual connection, skip connection, attention map, positional encoding, query, key, value, softmax, temperature, logits, probability, score, confidence, threshold, calibration, robustness, generalization, scalability, efficiency, latency, throughput, memory, parameter, hyperparameter, initialization, seed, reproducibility, ablation study, baseline, state-of-the-art, sota, comparison, improvement, gain, trade-off, limitation, future work 등)는 번역하지 말고 반드시 영어 원어 그대로 사용할 것.
-
-출력 형식(반드시 준수):
-TITLE: <영문 제목>
-BODY:
-<본문>
-
-(논문과 논문 사이는 빈 줄 2줄)
+Title: {paper.title}
+Abstract: {paper.summary}
+PDF: {paper.pdf_url}
 """.strip()
+    return user_text
+
+
+def chunk_text_by_chars(text, chunk_chars=2000, overlap=0):
+    text = text or ""
+    if len(text) <= chunk_chars:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_chars
+        chunk = text[start:end]
+        chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = end - overlap if overlap > 0 else end
+    return chunks
 
 
 def call_gpt_text(system_text, user_text, max_tokens):
@@ -421,193 +260,294 @@ def call_gpt_text(system_text, user_text, max_tokens):
     return (resp.choices[0].message.content or "").strip()
 
 
+
+def call_gpt_json(system_text, user_text, max_tokens=2000, retries=2, sleep_sec=1.0):
+    """
+    LLM에게 JSON만 출력하도록 요청하고 파싱해서 dict로 반환.
+    - 다른 코드 로직에 영향 주지 않기 위해, 실패 시 빈 dict 반환(로그 출력).
+    """
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp_text = call_gpt_text(system_text, user_text, max_tokens=max_tokens)
+            cleaned = resp_text.strip()
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            if "{" in cleaned and "}" in cleaned:
+                cleaned = cleaned[cleaned.find("{"): cleaned.rfind("}") + 1]
+            return json.loads(cleaned)
+        except Exception as e:
+            last_err = e
+            print(f"[LLM_JSON] parse_failed attempt={attempt} err={e}")
+            if attempt < retries:
+                time.sleep(sleep_sec)
+    print(f"[LLM_JSON] giving_up err={last_err}")
+    return {}
+
+
+def get_arxiv_id_from_pdf_url(pdf_url: str) -> str:
+    """
+    예: https://arxiv.org/pdf/2602.03414v1 -> 2602.03414v1
+        https://arxiv.org/pdf/2602.03414v1.pdf -> 2602.03414v1
+    """
+    if not pdf_url:
+        return ""
+    m = re.search(r"/pdf/([0-9]+\.[0-9]+v[0-9]+)", pdf_url)
+    if m:
+        return m.group(1)
+    m = re.search(r"/pdf/([0-9]+\.[0-9]+)", pdf_url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def build_today_trend_themes_via_llm(papers, max_titles=160, n_themes=10):
+    titles = []
+    for p in papers[:max_titles]:
+        t = (p.title or "").strip()
+        if t:
+            titles.append(t)
+
+    titles_block = "\n".join([f"- {t}" for t in titles])
+
+    system_text = "너는 컴퓨터 비전(cs.CV) 연구 트렌드를 요약하는 분석가다. 반드시 JSON만 출력한다."
+    user_text = f"""
+아래는 오늘 arXiv cs.CV에 올라온 논문 제목 목록이다(의료 논문은 이미 제외됨).
+이 목록만 보고, '오늘의 CV 트렌드 테마'를 {n_themes}개 뽑아라.
+
+출력은 반드시 아래 JSON 스키마를 만족해야 한다. 다른 텍스트 금지.
+
+{{
+  "themes": [
+    {{
+      "name": "짧은 테마명",
+      "keywords": ["키워드/구문1","키워드/구문2","키워드/구문3"],
+      "one_line": "왜 오늘 트렌드인지 1줄 설명"
+    }}
+  ]
+}}
+
+규칙:
+- themes 길이는 정확히 {n_themes}
+- keywords는 각 테마당 3~6개, 너무 일반적인 단어(예: model, method, learning)는 피함
+- 키워드는 제목에 실제로 등장하거나 강하게 연상되는 구문 위주로
+
+제목 목록:
+{titles_block}
+""".strip()
+
+    data = call_gpt_json(system_text, user_text, max_tokens=2000)
+    themes = data.get("themes", []) if isinstance(data, dict) else []
+    if not isinstance(themes, list):
+        themes = []
+
+    clean_themes = []
+    for th in themes:
+        if not isinstance(th, dict):
+            continue
+        name = (th.get("name") or "").strip()
+        kws = th.get("keywords") or []
+        one_line = (th.get("one_line") or "").strip()
+        if name and isinstance(kws, list) and len(kws) >= 1:
+            clean_themes.append({
+                "name": name,
+                "keywords": [str(x).strip() for x in kws if str(x).strip()],
+                "one_line": one_line
+            })
+    return clean_themes
+
+
+def compute_trend_match_score(title: str, abstract: str, themes) -> float:
+    text = f"{title}\n{abstract}".lower()
+    score = 0.0
+    for th in themes:
+        kws = th.get("keywords", [])
+        for kw in kws:
+            k = str(kw).strip().lower()
+            if not k:
+                continue
+            if k in text:
+                score += 1.0
+    return score
+
+
+def select_topk_by_trend(papers, themes, topk=50, min_keep=30):
+    scored_local = []
+    for p in papers:
+        s = compute_trend_match_score(p.title or "", p.summary or "", themes)
+        scored_local.append((s, p))
+
+    scored_local.sort(key=lambda x: x[0], reverse=True)
+
+    selected = [p for (s, p) in scored_local[:topk]]
+
+    if len(selected) < min_keep:
+        selected = [p for (_, p) in scored_local[:min_keep]]
+
+    return selected, scored_local[:topk]
+
+
+def pick_top10_via_llm(candidates_topk, n_pick=10):
+    items = []
+    for p in candidates_topk:
+        arxiv_id = get_arxiv_id_from_pdf_url(getattr(p, "pdf_url", "") or "")
+        title = (p.title or "").strip()
+        abstract = (p.summary or "").strip()
+        abstract = abstract[:900]
+        items.append({
+            "arxiv_id": arxiv_id,
+            "title": title,
+            "abstract": abstract
+        })
+
+    system_text = "너는 IRCV 랩실의 수석 연구 비서다. 반드시 JSON만 출력한다."
+    user_text = f"""
+아래 후보 논문 목록에서 '오늘 업데이트된 cs.CV 논문 중 주요 논문 Top{n_pick}'을 선정해라.
+출력은 제목만 뽑되, 내부 디버깅을 위해 1줄 이유도 함께 넣어라.
+
+선정 기준은 네가 판단하되, 대략 다음을 우선한다:
+- 새로운 문제 설정/새 태스크
+- 커뮤니티 파급력(다음 연구가 참조하기 쉬운 자원/프레임워크/벤치)
+- 비디오/멀티모달/3D/효율/생성 등 현재 활발한 흐름과의 연결
+- 단순 응용/특정 도메인에만 갇힌 논문은 상대적으로 후순위
+
+반드시 아래 JSON 형식만 출력:
+{{
+  "top10": [
+    {{
+      "arxiv_id": "2602.03414v1",
+      "title": "논문 제목",
+      "reason": "1줄 이유"
+    }}
+  ],
+  "criteria": ["기준1","기준2","기준3","기준4"]
+}}
+
+규칙:
+- top10 길이는 정확히 {n_pick}
+- arxiv_id는 후보에 있는 것만 사용
+- title은 후보 title을 그대로 사용
+- 다른 텍스트 금지
+
+후보 목록(JSON):
+{json.dumps(items, ensure_ascii=False)}
+""".strip()
+
+    data = call_gpt_json(system_text, user_text, max_tokens=2200)
+    top10 = data.get("top10", []) if isinstance(data, dict) else []
+    if not isinstance(top10, list):
+        top10 = []
+    return data, top10
+
+
 def synthesize_tts_to_audio(text, tts_chunk_chars=2000, overlap=0):
     chunks = chunk_text_by_chars(text, chunk_chars=tts_chunk_chars, overlap=overlap)
     combined = AudioSegment.empty()
     for chunk in chunks:
-        audio_part_response = client.audio.speech.create(
+        audio_part = client.audio.speech.create(
             model=TTS_MODEL,
             voice=TTS_VOICE,
-            input=chunk,
-            speed=TTS_SPEED
+            input=chunk
         )
-        part_stream = io.BytesIO(audio_part_response.content)
-        segment = AudioSegment.from_file(part_stream, format="mp3")
-        combined += segment
+        combined += AudioSegment.from_file(io.BytesIO(audio_part.content), format="mp3")
     return combined
 
 
-def sanitize_title_for_tts(title):
-    if not title:
-        return ""
-    return re.sub(r"[:\-+/]", ",", title)
+def upload_to_notion(date_korean, summary_text, full_scripts, valid_papers):
+    children = []
+
+    children.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": "모닝 브리핑"}}]}
+    })
+    children.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary_text}}]}
+    })
+
+    children.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 본문 스크립트"}}]}
+    })
+
+    for i, script in enumerate(full_scripts):
+        children.append({
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"Paper {i+1}"}}]}
+        })
+        children.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": script}}]}
+        })
+
+    children.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 원문 링크"}}]}
+    })
+
+    for i, p in enumerate(valid_papers):
+        children.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": f"{i + 1}. {p.title} "}},
+                    {"type": "text", "text": {"content": "PDF", "link": {"url": p.pdf_url}},
+                     "annotations": {"bold": True, "color": "blue"}}
+                ]
+            }
+        })
+
+    notion.pages.create(
+        parent={"database_id": DATABASE_ID},
+        properties={
+            "Name": {"title": [{"text": {"content": f"{date_korean}자 모닝 브리핑"}}]},
+        },
+        children=children
+    )
 
 
-def parse_title_body_blocks(text):
-    text = (text or "").strip()
-    if not text:
-        return []
+def main():
+    now_et = datetime.datetime.now(tz=ET)
+    window_end_et = now_et.replace(hour=14, minute=0, second=0, microsecond=0)
+    window_start_et = window_end_et - datetime.timedelta(days=WINDOW_DAYS)
 
-    pattern = r"TITLE:\s*(.*?)\s*BODY:\s*(.*?)(?=(?:\n\s*TITLE:)|\Z)"
-    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+    print(f"[DEBUG] window_start_et = {window_start_et}")
+    print(f"[DEBUG] window_end_et   = {window_end_et}")
+    print("window_start_et <= published_et < window_end_et")
 
-    blocks = []
-    for title, body in matches:
-        t = title.strip()
-        b = body.strip()
-        if t and b:
-            blocks.append((t, b))
-
-    if blocks:
-        return blocks
-
-    fallback = []
-    chunks = re.split(r"\n\s*TITLE:\s*", "\n" + text)
-    for c in chunks:
-        c = c.strip()
-        if not c:
-            continue
-        if "BODY:" in c:
-            t, b = c.split("BODY:", 1)
-            t = t.strip()
-            b = b.strip()
-            if t and b:
-                fallback.append((t, b))
-    return fallback
-
-
-def assemble_radio_script(full_batches_text, total_papers):
-    intro = f"안녕하세요, 아이알씨브이 랩실의 수석 연구 비서입니다. 오늘 살펴볼 컴퓨터 비전 신규 논문은 총 {total_papers}건입니다."
-    outro = "오늘의 브리핑이 여러분의 연구에 영감이 되길 바랍니다. 이상, 아이알씨브이 연구 비서였습니다. 감사합니다."
-
-    all_blocks = []
-    for batch_text in full_batches_text:
-        all_blocks.extend(parse_title_body_blocks(batch_text))
-
-    script_parts = [intro, ""]
-    for i, (title, body) in enumerate(all_blocks, start=1):
-        title_tts = sanitize_title_for_tts(title)
-
-        if i == 1:
-            transition = "오늘 첫 번째로 살펴볼 논문입니다."
-        else:
-            transition = f"계속해서 {i}번째 논문을 보겠습니다."
-
-        script_parts.append(transition)
-        script_parts.append(f"논문 제목은 {title_tts} 입니다.")
-        script_parts.append(body)
-        script_parts.append("")
-
-    if len(all_blocks) < total_papers:
-        script_parts.append("일부 논문은 요약 중심으로 간략히 다뤄졌습니다.")
-        script_parts.append("")
-
-    script_parts.append(outro)
-    return "\n".join(script_parts).strip()
-
-
-def get_submission_window_et(now_et):
-    wd = now_et.weekday()
-
-    if wd in (4, 5):
-        return None, None
-
-    today_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    def at_14(d):
-        return d.replace(hour=14, minute=0, second=0, microsecond=0)
-
-    if wd == 1:
-        end_et = at_14(today_et)
-        start_et = end_et - datetime.timedelta(days=1)
-        return start_et, end_et
-
-    if wd == 2:
-        end_et = at_14(today_et)
-        start_et = end_et - datetime.timedelta(days=1)
-        return start_et, end_et
-
-    if wd == 3:
-        end_et = at_14(today_et)
-        start_et = end_et - datetime.timedelta(days=1)
-        return start_et, end_et
-
-    if wd == 6:
-        end_et = at_14(today_et - datetime.timedelta(days=2))
-        start_et = end_et - datetime.timedelta(days=1)
-        return start_et, end_et
-
-    if wd == 0:
-        end_et = at_14(today_et)
-        start_et = end_et - datetime.timedelta(days=3)
-        return start_et, end_et
-
-    return None, None
-
-
-def run_bot():
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    audio_dir = os.path.join(base_path, "audio")
-    os.makedirs(audio_dir, exist_ok=True)
-
-    et = ZoneInfo("America/New_York")
-    now_et = datetime.datetime.now(et)
-
-    #----------------------------------------------------------------- 디버깅용 날짜 임의 조작 ----------------------------------------------------------
-    now_et = datetime.datetime(2026, 2, 3, 20, 0, 0, tzinfo=et)
-    #--------------------------------------------------------------------------------------------------------------------------------------------------
-
-    window_start_et, window_end_et = get_submission_window_et(now_et)
-    print("Submission window (ET)")
-    print(f"window_start_et = {window_start_et}")
-    print(f"window_end_et   = {window_end_et}")
-
-    if window_start_et is None:
-        print("오늘은 arXiv announce가 없는 날(ET 기준 금 토)이라 종료합니다.")
-        return
-
-    seoul_tz = timezone("Asia/Seoul")
-    now = datetime.datetime.now(seoul_tz)
+    date_korean = window_end_et.strftime("%Y-%m-%d")
 
     search = arxiv.Search(
         query="cat:cs.CV",
-        max_results=200,
-        sort_by=arxiv.SortCriterion.SubmittedDate
+        max_results=MAX_RESULTS,
+        sort_by=arxiv.SortCriterion.SubmittedDate,
+        sort_order=arxiv.SortOrder.Descending
     )
 
-    print("arXiv search config")
-    print("query=cat:cs.CV")
-    print("max_results=200")
-    print("sort_by=SubmittedDate(desc)")
+    results = list(search.results())
 
-    arxiv_client = arxiv.Client()
+    print(f"[DEBUG] fetched_results = {len(results)} (max_results={MAX_RESULTS})")
 
     candidates = []
-    total_scanned = 0
-    for p in arxiv_client.results(search):
-        total_scanned += 1
-        p_submitted_et = p.published.astimezone(et)
+    for r in results:
+        if is_today_published_in_et(r.published, window_start_et, window_end_et):
+            candidates.append(r)
 
-        print(f"[SCAN] [{p.title[:120]}]")
-        print(f"       submitted_et = {p_submitted_et}")
-
-        if window_start_et <= p_submitted_et < window_end_et:
-            print("       -> IN WINDOW")
-            candidates.append(p)
-        else:
-            print("       -> OUT OF WINDOW")
-
-    print(f"Total scanned papers = {total_scanned}")
-    print(f"Papers in submission window = {len(candidates)}")
+    print(f"[DEBUG] candidates_in_window = {len(candidates)}")
 
     if not candidates:
-        print("해당 submission window에서 새로 올라온 논문이 없습니다.")
-        print(f"window(ET): {window_start_et} ~ {window_end_et}")
-        print("No paper satisfied:")
-        print("window_start_et <= published_et < window_end_et")
+        print("오늘 제출된 cs.CV 논문이 없습니다(ET 기준 window).")
         return
 
     scored = []
+    filtered_candidates = []
     for p in candidates:
         # 1) 의료/바이오 논문은 즉시 제외 (저자 조회 안 함)
         med_pen = medical_penalty_score(p.title, p.summary)
@@ -623,30 +563,62 @@ def run_bot():
             print(f"         title = {p.title[:80]}")
             continue
 
-        # 3) 저자 점수만 사용 (0~1 정규화 값)
-        author_norm, author_debug = (0.0, [])
-        if AUTHOR_SCORE_ENABLED:
-            author_norm, author_debug = get_author_score_for_paper(p)
+        # 3) (변경) LLM 기반 트렌드/Top10 선정용으로 후보만 모아둠
+        filtered_candidates.append(p)
+        print("[PASS] candidate_kept")
+        print(f"       title = {p.title[:80]}")
 
-        final_score = author_norm
+    # (변경) 1) 오늘 트렌드 테마/키워드 추출 -> 2) 로컬 TopK 축소 -> 3) LLM 최종 Top10
+    if not filtered_candidates:
+        print("필터(의료/비CV) 이후 남은 논문이 없습니다.")
+        return
 
-        print("[SCORE]")
-        print(f"title = {p.title[:80]}")
-        print(f"author_score = {final_score:.4f}")
+    print(f"[CANDIDATES] after_filters = {len(filtered_candidates)}")
 
-        if AUTHOR_SCORE_ENABLED and author_debug:
-            for a in author_debug[:2]:
-                print(
-                    f"    {a.get('name')} "
-                    f"hIndex={a.get('hIndex')} "
-                    f"citations={a.get('citationCount')} "
-                    f"papers={a.get('paperCount')}"
-                )
+    themes = build_today_trend_themes_via_llm(filtered_candidates, max_titles=160, n_themes=10)
+    print("[TREND_THEMES]")
+    for i, th in enumerate(themes[:10]):
+        print(f"  {i+1}. {th.get('name')}")
+        kws = th.get("keywords", [])[:6]
+        if kws:
+            print(f"     keywords: {', '.join(kws)}")
+        one_line = th.get("one_line", "")
+        if one_line:
+            print(f"     note: {one_line}")
 
-        scored.append((final_score, p))
+    topk_candidates, topk_debug = select_topk_by_trend(filtered_candidates, themes, topk=50, min_keep=30)
+    print(f"[TOPK] selected_for_llm = {len(topk_candidates)}")
+    for s, p in topk_debug[:10]:
+        print(f"  score={s:.1f} title={p.title[:80]}")
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    valid_papers = [x[1] for x in scored[:10]]
+    top10_data, top10_list = pick_top10_via_llm(topk_candidates, n_pick=10)
+
+    id_to_paper = {}
+    for p in topk_candidates:
+        pid = get_arxiv_id_from_pdf_url(getattr(p, "pdf_url", "") or "")
+        if pid:
+            id_to_paper[pid] = p
+
+    chosen = []
+    seen = set()
+    for item in top10_list:
+        pid = str(item.get("arxiv_id", "")).strip()
+        if pid in id_to_paper and pid not in seen:
+            chosen.append(id_to_paper[pid])
+            seen.add(pid)
+
+    if len(chosen) < 10:
+        for p in topk_candidates:
+            pid = get_arxiv_id_from_pdf_url(getattr(p, "pdf_url", "") or "")
+            key = pid or p.title
+            if key in seen:
+                continue
+            chosen.append(p)
+            seen.add(key)
+            if len(chosen) >= 10:
+                break
+
+    valid_papers = chosen[:10]
 
     if not valid_papers:
         print("필터(의료/비CV) 이후 남은 논문이 없습니다.")
@@ -656,118 +628,26 @@ def run_bot():
     system_full = "너는 IRCV 랩실의 수석 연구 비서이자 AI 전문 라디오 진행자야. 한국어로 논문 본문 스크립트만 작성해줘."
 
     user_summary = prompt_summary_and_3min(valid_papers)
-    summary_out = call_gpt_text(system_summary, user_summary, MAX_OUT_TOKENS_SUMMARY)
+    summary_text = call_gpt_text(system_summary, user_summary, MAX_OUT_TOKENS_SUMMARY)
+    print("[GPT] summary+3min completed")
 
-    if "[3분대본]" in summary_out:
-        summary_text = summary_out.split("[3분대본]")[0].replace("[요약]", "").strip()
-        audio_script_3min = summary_out.split("[3분대본]")[1].strip()
-    else:
-        summary_text = summary_out.replace("[요약]", "").strip()
-        audio_script_3min = ""
+    full_scripts = []
+    for i in range(0, len(valid_papers), BATCH_SIZE_FULL):
+        batch = valid_papers[i:i + BATCH_SIZE_FULL]
+        for p in batch:
+            user_full = prompt_full_script_for_each_paper(p)
+            script = call_gpt_text(system_full, user_full, MAX_OUT_TOKENS_FULL_PER_PAPER)
+            full_scripts.append(script)
+            print(f"[GPT] full_script completed: {p.title[:50]}")
+        time.sleep(0.5)
 
-    paper_batches = [valid_papers[i:i + BATCH_SIZE_FULL] for i in range(0, len(valid_papers), BATCH_SIZE_FULL)]
-    total_batches = len(paper_batches)
+    upload_to_notion(date_korean, summary_text, full_scripts, valid_papers)
+    print("[NOTION] upload completed")
 
-    full_batches_text = []
-    for idx, batch in enumerate(paper_batches, start=1):
-        start_index = (idx - 1) * BATCH_SIZE_FULL + 1
-        user_full = prompt_full_body_for_batch(batch, idx, total_batches, start_index)
-        batch_text = call_gpt_text(system_full, user_full, MAX_OUT_TOKENS_FULL_PER_BATCH)
-        full_batches_text.append(batch_text)
-
-    audio_script_full = assemble_radio_script(full_batches_text, total_papers=len(valid_papers))
-
-    combined_audio = synthesize_tts_to_audio(
-        audio_script_full,
-        tts_chunk_chars=TTS_CHUNK_CHARS,
-        overlap=TTS_CHUNK_OVERLAP
-    )
-
-    today_date = now.strftime("%Y%m%d")
-    file_name_full = f"CV_Daily_Briefing_{today_date}.mp3"
-    full_file_path = os.path.join(audio_dir, file_name_full)
-    combined_audio.export(full_file_path, format="mp3")
-
-    file_name_3min = f"3Min_Summary_{today_date}.mp3"
-    full_file_path_3min = os.path.join(audio_dir, file_name_3min)
-
-    if audio_script_3min.strip():
-        audio_3min = synthesize_tts_to_audio(
-            audio_script_3min,
-            tts_chunk_chars=TTS_CHUNK_CHARS,
-            overlap=TTS_CHUNK_OVERLAP
-        )
-        audio_3min.export(full_file_path_3min, format="mp3")
-    else:
-        open(full_file_path_3min, "wb").close()
-
-    audio_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_full}"
-    audio_url_3min = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/audio/{file_name_3min}"
-    page_title = f"{now.strftime('%Y-%m-%d')} 브리핑"
-
-    notion_children = [
-        {"object": "block", "type": "heading_2",
-         "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 핵심 요약"}}]}},
-    ]
-
-    for part in split_notion_text(summary_text, max_len=1900):
-        notion_children.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [{"type": "text", "text": {"content": part}}]}
-        })
-
-    notion_children += [
-        {"object": "block", "type": "divider", "divider": {}},
-        {"object": "block", "type": "heading_2",
-         "heading_2": {"rich_text": [{"type": "text", "text": {"content": "논문 원문 링크"}}]}}
-    ]
-
-    for i, p in enumerate(valid_papers):
-        notion_children.append({
-            "object": "block", "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [
-                    {"type": "text", "text": {"content": f"{i + 1}. {p.title} "}},
-                    {"type": "text", "text": {"content": "PDF", "link": {"url": p.pdf_url}},
-                     "annotations": {"bold": True, "color": "blue"}}
-                ]
-            }
-        })
-
-    notion.pages.create(
-        parent={"database_id": DATABASE_ID},
-        properties={
-            "요약 & 논문링크": {"title": [{"text": {"content": page_title}}]},
-            "날짜": {"date": {"start": now.date().isoformat()}},
-            "전체 브리핑": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": "▶ 전체 브리핑 다운",
-                            "link": {"url": audio_url}
-                        }
-                    }
-                ]
-            },
-            "3분 요약": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": "▶ 3분 요약 다운",
-                            "link": {"url": audio_url_3min}
-                        }
-                    }
-                ]
-            }
-        },
-        children=notion_children
-    )
-
-    print(f"통합 브리핑 생성 완료: {len(valid_papers)}개의 논문")
+    audio = synthesize_tts_to_audio(summary_text, tts_chunk_chars=2000, overlap=0)
+    audio.export("morning_briefing.mp3", format="mp3")
+    print("[TTS] morning_briefing.mp3 created")
 
 
 if __name__ == "__main__":
-    run_bot()
+    main()

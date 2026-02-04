@@ -503,9 +503,9 @@ def run_bot():
     now_et = datetime.datetime.now(et)
 
     window_start_et, window_end_et = get_submission_window_et(now_et)
-    print("[DEBUG] Submission window (ET)")
-    print(f"[DEBUG] window_start_et = {window_start_et}")
-    print(f"[DEBUG] window_end_et   = {window_end_et}")
+    print("Submission window (ET)")
+    print(f"window_start_et = {window_start_et}")
+    print(f"window_end_et   = {window_end_et}")
 
     if window_start_et is None:
         print("오늘은 arXiv announce가 없는 날(ET 기준 금 토)이라 종료합니다.")
@@ -520,10 +520,10 @@ def run_bot():
         sort_by=arxiv.SortCriterion.SubmittedDate
     )
 
-    print("[DEBUG] arXiv search config")
-    print("[DEBUG] query=cat:cs.CV")
-    print("[DEBUG] max_results=200")
-    print("[DEBUG] sort_by=SubmittedDate(desc)")
+    print("arXiv search config")
+    print("query=cat:cs.CV")
+    print("max_results=200")
+    print("sort_by=SubmittedDate(desc)")
 
     arxiv_client = arxiv.Client()
 
@@ -533,49 +533,53 @@ def run_bot():
         total_scanned += 1
         p_submitted_et = p.published.astimezone(et)
 
-        print(f"[DEBUG][SCAN] {p.title[:60]}")
-        print(f"[DEBUG][SCAN] submitted_et = {p_submitted_et}")
+        print(f"[SCAN] {p.title[:60]}")
+        print(f"[SCAN] submitted_et = {p_submitted_et}")
 
         if window_start_et <= p_submitted_et < window_end_et:
-            print("[DEBUG][SCAN] -> IN WINDOW")
+            print("[SCAN] -> IN WINDOW")
             candidates.append(p)
         else:
-            print("[DEBUG][SCAN] -> OUT OF WINDOW")
+            print("[SCAN] -> OUT OF WINDOW")
 
-    print(f"[DEBUG] Total scanned papers = {total_scanned}")
-    print(f"[DEBUG] Papers in submission window = {len(candidates)}")
+    print(f"Total scanned papers = {total_scanned}")
+    print(f"Papers in submission window = {len(candidates)}")
 
     if not candidates:
         print("해당 submission window에서 새로 올라온 논문이 없습니다.")
         print(f"window(ET): {window_start_et} ~ {window_end_et}")
-        print("[DEBUG] No paper satisfied:")
-        print("[DEBUG] window_start_et <= published_et < window_end_et")
+        print("No paper satisfied:")
+        print("window_start_et <= published_et < window_end_et")
         return
 
     scored = []
     for p in candidates:
-        penalty = medical_penalty_score(p.title, p.summary)
-        base_score = 100.0 - float(penalty)
-
+        # 1. 의료/바이오 논문은 즉시 제외 (저자 조회 안 함)
+        if medical_penalty_score(p.title, p.summary) > 0:
+            continue
+    
+        # 2. 저자 점수만 사용 (0~1 정규화 값)
         author_norm, author_debug = (0.0, [])
         if AUTHOR_SCORE_ENABLED:
             author_norm, author_debug = get_author_score_for_paper(p)
-
-        final_score = base_score + (AUTHOR_WEIGHT * author_norm)
-
-        print("[DEBUG][SCORE]")
-        print(f"[DEBUG][SCORE] title = {p.title[:80]}")
-        print(f"[DEBUG][SCORE] medical_penalty = {penalty}")
-        print(f"[DEBUG][SCORE] base_score = {base_score}")
-        print(f"[DEBUG][SCORE] author_norm = {author_norm}")
-        print(f"[DEBUG][SCORE] AUTHOR_WEIGHT = {AUTHOR_WEIGHT}")
-        print(f"[DEBUG][SCORE] final_score = {final_score}")
+    
+        final_score = author_norm
+    
+        # 3. 디버그 로그 (의미 있는 정보만)
+        print("[SCORE]")
+        print(f"[SCORE] title        = {p.title[:80]}")
+        print(f"[SCORE] author_score = {final_score:.4f}")
+    
         if AUTHOR_SCORE_ENABLED and author_debug:
-            top_show = author_debug[:5]
-            for a in top_show:
-                print(f"[DEBUG][AUTHOR] {a.get('name')} hIndex={a.get('hIndex')} citations={a.get('citationCount')} papers={a.get('paperCount')}")
-
-        scored.append((final_score, penalty, author_norm, p))
+            for a in author_debug[:2]:  # 1,2저자만 출력
+                print(
+                    f"[AUTHOR] {a.get('name')} "
+                    f"hIndex={a.get('hIndex')} "
+                    f"citations={a.get('citationCount')} "
+                    f"papers={a.get('paperCount')}"
+                )
+    
+        scored.append((final_score, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     valid_papers = [x[3] for x in scored[:10]]
